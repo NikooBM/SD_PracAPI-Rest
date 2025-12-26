@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVCharging - Panel de Control Profesional</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #667eea;
+            --primary-dark: #5568d3;
+            --secondary: #764ba2;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --dark: #1e293b;
+            --light: #f8fafc;
+            --border: #e2e8f0;
+        }
+
+        body {
+            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: var(--dark);
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 25px 35px;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .header-title h1 {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 2.2em;
+            font-weight: 800;
+        }
+
+        .header-title .icon {
+            font-size: 2.5em;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .status-badge {
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+        }
+
+        .status-badge.online {
+            background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        .status-badge.offline {
+            background: linear-gradient(135deg, var(--danger) 0%, #dc2626 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+        }
+
+        .status-pulse {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: currentColor;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .config-panel {
+            background: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .config-panel label {
+            font-weight: 600;
+            color: var(--dark);
+        }
+
+        .config-panel input {
+            padding: 12px 18px;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            flex: 1;
+            min-width: 250px;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+        }
+
+        .config-panel input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--primary);
+            border: 2px solid var(--primary);
+        }
+
+        .btn-secondary:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 28px;
+            border-radius: 16px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+
+        .stat-card h3 {
+            color: #64748b;
+            font-size: 0.85em;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .stat-card .value {
+            font-size: 2.8em;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1.2;
+        }
+
+        .stat-card .subtitle {
+            font-size: 0.9em;
+            color: #94a3b8;
+            margin-top: 8px;
+        }
+
+        .section {
+            background: white;
+            padding: 35px;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid var(--light);
+        }
+
+        .section-title {
+            font-size: 1.6em;
+            color: var(--dark);
+            font-weight: 800;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .section-title .icon {
+            font-size: 1.3em;
+        }
+
+        .cps-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .cp-card {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            padding: 24px;
+            border-radius: 16px;
+            color: white;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .cp-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            transform: translate(30%, -30%);
+        }
+
+        .cp-card:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+        }
+
+        .cp-card.available {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .cp-card.charging {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            animation: pulse-slow 2s infinite;
+        }
+
+        @keyframes pulse-slow {
+            0%, 100% { box-shadow: 0 8px 25px rgba(245, 158, 11, 0.3); }
+            50% { box-shadow: 0 8px 35px rgba(245, 158, 11, 0.6); }
+        }
+
+        .cp-card.stopped {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .cp-card.broken {
+            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+        }
+
+        .cp-card.disconnected {
+            background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+            opacity: 0.7;
+        }
+
+        .cp-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .cp-card h3 {
+            font-size: 1.4em;
+            font-weight: 800;
+            margin-bottom: 5px;
+        }
+
+        .cp-badge {
+            background: rgba(255, 255, 255, 0.25);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            font-weight: 700;
+            backdrop-filter: blur(10px);
+        }
+
+        .cp-info {
+            margin: 10px 0;
+            font-size: 0.95em;
+            opacity: 0.95;
+            line-height: 1.8;
+        }
+
+        .cp-info strong {
+            display: block;
+            font-size: 1.3em;
+            margin-top: 8px;
+        }
+
+        .weather-alert {
+            background: rgba(255, 255, 255, 0.2);
+            border-left: 4px solid #fbbf24;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-top: 12px;
+            font-weight: 600;
+            font-size: 0.9em;
+            backdrop-filter: blur(10px);
+        }
+
+        .sessions-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0 8px;
+            margin-top: 20px;
+        }
+
+        .sessions-table th {
+            background: var(--light);
+            color: var(--dark);
+            padding: 16px 18px;
+            text-align: left;
+            font-weight: 700;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-top: none;
+            border-bottom: none;
+        }
+
+        .sessions-table th:first-child {
+            border-radius: 8px 0 0 8px;
+        }
+
+        .sessions-table th:last-child {
+            border-radius: 0 8px 8px 0;
+        }
+
+        .sessions-table td {
+            padding: 16px 18px;
+            background: white;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sessions-table td:first-child {
+            border-left: 1px solid var(--border);
+            border-radius: 8px 0 0 8px;
+        }
+
+        .sessions-table td:last-child {
+            border-right: 1px solid var(--border);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .sessions-table tr:hover td {
+            background: var(--light);
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 60px;
+            color: #9ca3af;
+            font-size: 1.2em;
+            font-weight: 500;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 80px;
+            font-size: 1.4em;
+            color: var(--primary);
+            font-weight: 700;
+        }
+
+        .spinner {
+            border: 5px solid var(--light);
+            border-top: 5px solid var(--primary);
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+            color: #991b1b;
+            padding: 25px;
+            border-radius: 12px;
+            margin: 20px 0;
+            text-align: center;
+            font-weight: 600;
+            border-left: 5px solid #dc2626;
+        }
+
+        .timestamp {
+            text-align: center;
+            color: #64748b;
+            font-size: 0.9em;
+            margin-top: 25px;
+            font-weight: 500;
+        }
+
+        .alert-banner {
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border-left: 5px solid #f59e0b;
+            padding: 20px 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 4px 15px rgba(245, 158, 11, 0.2);
+        }
+
+        .alert-banner .icon {
+            font-size: 2em;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: 700;
+        }
+
+        .badge-success { background: #d1fae5; color: #065f46; }
+        .badge-warning { background: #fed7aa; color: #92400e; }
+        .badge-danger { background: #fecaca; color: #991b1b; }
+        .badge-info { background: #dbeafe; color: #1e40af; }
+
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            }
+
+            .cps-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- HEADER -->
+        <div class="header">
+            <div class="header-title">
+                <span class="icon">⚡</span>
+                <h1>EVCharging Network</h1>
+            </div>
+            <div class="header-controls">
+                <div id="connection-status" class="status-badge offline">
+                    <span class="status-pulse"></span>
+                    <span>Sin conexión</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- CONFIG PANEL -->
+        <div class="config-panel">
+            <label for="api-url">🌐 API Central:</label>
+            <input type="text" id="api-url" value="http://localhost:8080" placeholder="http://ip:puerto">
+            <button class="btn btn-primary" onclick="updateApiUrl()">💾 Guardar</button>
+            <button class="btn btn-secondary" onclick="fetchData()">🔄 Recargar</button>
+        </div>
+
+        <!-- LOADING -->
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <div>Cargando datos del sistema...</div>
+        </div>
+
+        <!-- ERROR -->
+        <div id="error" class="error" style="display: none;"></div>
+
+        <!-- CONTENT -->
+        <div id="content" style="display: none;">
+            <!-- WEATHER ALERTS BANNER -->
+            <div id="alerts-banner" style="display: none;" class="alert-banner">
+                <span class="icon">❄️</span>
+                <div>
+                    <strong>Alertas Climáticas Activas</strong>
+                    <p id="alerts-summary">Hay CPs afectados por condiciones climáticas adversas</p>
+                </div>
+            </div>
+
+            <!-- ESTADÍSTICAS -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>Total CPs</h3>
+                    <div class="value" id="stat-total-cps">0</div>
+                    <div class="subtitle">Puntos registrados</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Disponibles</h3>
+                    <div class="value" id="stat-available">0</div>
+                    <div class="subtitle">Listos para usar</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Cargando Ahora</h3>
+                    <div class="value" id="stat-charging">0</div>
+                    <div class="subtitle">Sesiones activas</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Energía Total</h3>
+                    <div class="value" id="stat-energy">0</div>
+                    <div class="subtitle">kWh suministrados</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Ingresos</h3>
+                    <div class="value" id="stat-revenue">0€</div>
+                    <div class="subtitle">Total acumulado</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Alertas</h3>
+                    <div class="value" id="stat-alerts">0</div>
+                    <div class="subtitle">Incidencias activas</div>
+                </div>
+            </div>
+
+            <!-- CHARGING POINTS -->
+            <div class="section">
+                <div class="section-header">
+                    <div class="section-title">
+                        <span class="icon">📍</span>
+                        <span>Charging Points</span>
+                    </div>
+                </div>
+                <div id="cps-grid" class="cps-grid"></div>
+            </div>
+
+            <!-- SESIONES ACTIVAS -->
+            <div class="section">
+                <div class="section-header">
+                    <div class="section-title">
+                        <span class="icon">⚡</span>
+                        <span>Sesiones de Carga Activas</span>
+                    </div>
+                </div>
+                <div id="active-sessions"></div>
+            </div>
+
+            <!-- HISTORIAL -->
+            <div class="section">
+                <div class="section-header">
+                    <div class="section-title">
+                        <span class="icon">📊</span>
+                        <span>Historial Reciente</span>
+                    </div>
+                </div>
+                <div id="session-history"></div>
+            </div>
+
+            <div class="timestamp" id="last-update"></div>
+        </div>
+    </div>
+
+    <script>
+        let apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8080';
+        document.getElementById('api-url').value = apiUrl;
+
+        function updateApiUrl() {
+            apiUrl = document.getElementById('api-url').value.trim();
+            localStorage.setItem('apiUrl', apiUrl);
+            fetchData();
+        }
+
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('content').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+        }
+
+        function showContent() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
+            document.getElementById('error').style.display = 'none';
+        }
+
+        function showError(message) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('error').textContent = '❌ ' + message;
+        }
+
+        function updateConnectionStatus(online) {
+            const badge = document.getElementById('connection-status');
+            if (online) {
+                badge.className = 'status-badge online';
+                badge.innerHTML = '<span class="status-pulse"></span><span>Conectado</span>';
+            } else {
+                badge.className = 'status-badge offline';
+                badge.innerHTML = '<span class="status-pulse"></span><span>Sin conexión</span>';
+            }
+        }
+
+        async function fetchData() {
+            showLoading();
+
+            try {
+                const response = await fetch(`${apiUrl}/api/v1/system/status`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                
+                updateConnectionStatus(true);
+                renderData(data);
+                showContent();
+
+                document.getElementById('last-update').textContent = 
+                    `Última actualización: ${new Date().toLocaleString('es-ES')}`;
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                updateConnectionStatus(false);
+                showError(`No se pudo conectar con la API: ${error.message}`);
+            }
+        }
+
+        function renderData(data) {
+            // Estadísticas
+            const stats = data.stats || {};
+            document.getElementById('stat-total-cps').textContent = stats.total_cps || 0;
+            document.getElementById('stat-available').textContent = stats.cps_by_status?.AVAILABLE || 0;
+            document.getElementById('stat-charging').textContent = stats.cps_by_status?.CHARGING || 0;
+            document.getElementById('stat-energy').textContent = (stats.total_energy_kwh || 0).toFixed(1);
+            document.getElementById('stat-revenue').textContent = `${(stats.total_revenue_eur || 0).toFixed(2)}€`;
+            document.getElementById('stat-alerts').textContent = stats.weather_alerts || 0;
+
+            // Alertas Banner
+            const alertsBanner = document.getElementById('alerts-banner');
+            if (stats.weather_alerts > 0) {
+                alertsBanner.style.display = 'flex';
+                document.getElementById('alerts-summary').textContent = 
+                    `${stats.weather_alerts} CP${stats.weather_alerts > 1 ? 's' : ''} afectado${stats.weather_alerts > 1 ? 's' : ''} por condiciones climáticas adversas`;
+            } else {
+                alertsBanner.style.display = 'none';
+            }
+
+            // Charging Points
+            const cpsGrid = document.getElementById('cps-grid');
+            const cps = data.cps || [];
+
+            if (cps.length === 0) {
+                cpsGrid.innerHTML = '<div class="no-data">📭 No hay CPs registrados</div>';
+            } else {
+                cpsGrid.innerHTML = cps.map(cp => {
+                    const statusClass = (cp.status || 'DISCONNECTED').toLowerCase();
+                    const statusText = {
+                        'AVAILABLE': 'Disponible',
+                        'CHARGING': 'Cargando',
+                        'STOPPED': 'Fuera de Servicio',
+                        'BROKEN': 'Averiado',
+                        'DISCONNECTED': 'Desconectado'
+                    }[cp.status] || cp.status;
+
+                    const statusIcon = {
+                        'AVAILABLE': '✅',
+                        'CHARGING': '⚡',
+                        'STOPPED': '⛔',
+                        'BROKEN': '💥',
+                        'DISCONNECTED': '❌'
+                    }[cp.status] || '❓';
+
+                    let weatherAlert = '';
+                    if (cp.weather_alert && cp.weather_alert.active) {
+                        weatherAlert = `
+                            <div class="weather-alert">
+                                ❄️ ${cp.weather_alert.temperature}°C - Operación suspendida
+                            </div>
+                        `;
+                    }
+
+                    return `
+                        <div class="cp-card ${statusClass}">
+                            <div class="cp-header">
+                                <h3>${cp.cp_id}</h3>
+                                <span class="cp-badge">${statusIcon} ${statusText}</span>
+                            </div>
+                            <div class="cp-info">
+                                📍 ${cp.location}<br>
+                                💰 ${cp.price}€/kWh
+                                <strong>${statusText}</strong>
+                            </div>
+                            ${weatherAlert}
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            // Sesiones Activas
+            const sessionsDiv = document.getElementById('active-sessions');
+            const sessions = data.active_sessions || [];
+
+            if (sessions.length === 0) {
+                sessionsDiv.innerHTML = '<div class="no-data">📭 No hay sesiones activas</div>';
+            } else {
+                sessionsDiv.innerHTML = `
+                    <table class="sessions-table">
+                        <thead>
+                            <tr>
+                                <th>Sesión</th>
+                                <th>CP</th>
+                                <th>Driver</th>
+                                <th>Inicio</th>
+                                <th>Consumo</th>
+                                <th>Coste</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${sessions.map(s => `
+                                <tr>
+                                    <td><span class="badge badge-info">${s.session_id}</span></td>
+                                    <td><strong>${s.cp_id}</strong></td>
+                                    <td>${s.driver_id}</td>
+                                    <td>${new Date(s.start_time * 1000).toLocaleString('es-ES')}</td>
+                                    <td><strong>${(s.kw_consumed || 0).toFixed(2)} kWh</strong></td>
+                                    <td><strong>${(s.total_cost || 0).toFixed(2)}€</strong></td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            }
+        }
+
+        // Auto-refresh cada 5 segundos
+        setInterval(fetchData, 5001);
+
+        // Carga inicial
+        fetchData();
+    </script>
+</body>
+</html>

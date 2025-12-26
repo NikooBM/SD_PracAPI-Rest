@@ -1,0 +1,137 @@
+# ==============================================================================
+# ARCHIVOS DE CREDENCIALES Y CONFIGURACIÓN SENSIBLE
+# ==============================================================================
+
+# Archivos .env con claves reales
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Archivos de contraseñas y tokens generados
+*_password.txt
+*_token.txt
+*_encryption_key.txt
+
+# Claves privadas
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# ==============================================================================
+# BASES DE DATOS
+# ==============================================================================
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Backups de base de datos
+*.sql
+*.dump
+
+# ==============================================================================
+# LOGS Y AUDITORÍA
+# ==============================================================================
+
+# Archivos de log (pueden contener información sensible)
+*.log
+logs/
+audit.log
+audit_*.log
+
+# Archivos temporales de sesiones
+/tmp/
+*.pkl
+*.pickle
+
+# ==============================================================================
+# PYTHON
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# ==============================================================================
+# DOCKER
+# ==============================================================================
+
+# No subir volúmenes de Docker con datos sensibles
+db_data/
+audit_data/
+
+# ==============================================================================
+# SISTEMA OPERATIVO
+# ==============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+
+# ==============================================================================
+# OTROS
+# ==============================================================================
+
+# Archivos de respaldo
+*.bak
+*.swp
+*.swo
+*~
+
+# Archivos de prueba con datos reales
+test_credentials.json
+real_api_keys.txt

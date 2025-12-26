@@ -1,0 +1,32 @@
+# EVCharging Release 2 - Dependencias CORREGIDAS
+# Práctica SD 25/26
+
+# Kafka
+kafka-python==2.0.2
+
+# Security & Cryptography
+pycryptodome==3.19.0
+PyJWT==2.8.0
+pyOpenSSL==23.3.0
+cryptography==41.0.7
+
+# Web Frameworks
+Flask==3.0.0
+Flask-CORS==4.0.0
+Werkzeug==3.0.1
+
+# HTTP Requests
+requests==2.31.0
+urllib3==2.1.0
+
+# GUI (Tkinter viene con Python)
+# No se instala vía pip
+
+# Utilidades
+python-dotenv==1.0.0
+
+# Database (sqlite3 viene con Python)
+# No se instala vía pip
+
+# Logging y desarrollo
+colorama==0.4.6
