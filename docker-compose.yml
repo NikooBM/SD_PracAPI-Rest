@@ -102,7 +102,8 @@ services:
       SOCKET_PORT: 5001
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       DB_PATH: /app/data/evcharging.db
-      DISPLAY: ${DISPLAY}
+      DISPLAY: host.docker.internal:0
+      #${DISPLAY}
     command: python central/ev_central.py
     restart: unless-stopped
 
