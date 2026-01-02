@@ -676,13 +676,25 @@
             showLoading();
 
             try {
-                const response = await fetch(`${apiUrl}/api/v1/system/status`);
+                console.log(`Fetching data from: ${apiUrl}/api/v1/system/status`); // DEBUG
+                
+                const response = await fetch(`${apiUrl}/api/v1/system/status`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    mode: 'cors' // Explícitamente permitir CORS
+                });
+                
+                console.log('Response status:', response.status); // DEBUG
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
 
                 const data = await response.json();
+                console.log('Data received:', data); // DEBUG
                 
                 updateConnectionStatus(true);
                 renderData(data);
@@ -693,17 +705,28 @@
 
             } catch (error) {
                 console.error('Error fetching data:', error);
+                console.error('API URL:', apiUrl);
                 updateConnectionStatus(false);
-                showError(`No se pudo conectar con la API: ${error.message}`);
+                showError(`No se pudo conectar con la API: ${error.message}\n\nURL: ${apiUrl}/api/v1/system/status\n\nVerifica que:\n1. El contenedor api_central está corriendo\n2. La URL es correcta\n3. No hay errores de CORS`);
             }
         }
 
+
         function renderData(data) {
-            // Estadísticas
+            console.log('Renderizando datos:', data); // DEBUG
+            
+            // Verificar que data existe y tiene las propiedades necesarias
+            if (!data) {
+                console.error('No hay datos para renderizar');
+                showError('No se recibieron datos del servidor');
+                return;
+            }
+            
+            // Estadísticas con valores por defecto
             const stats = data.stats || {};
             document.getElementById('stat-total-cps').textContent = stats.total_cps || 0;
-            document.getElementById('stat-available').textContent = stats.cps_by_status?.AVAILABLE || 0;
-            document.getElementById('stat-charging').textContent = stats.cps_by_status?.CHARGING || 0;
+            document.getElementById('stat-available').textContent = (stats.cps_by_status && stats.cps_by_status.AVAILABLE) || 0;
+            document.getElementById('stat-charging').textContent = (stats.cps_by_status && stats.cps_by_status.CHARGING) || 0;
             document.getElementById('stat-energy').textContent = (stats.total_energy_kwh || 0).toFixed(1);
             document.getElementById('stat-revenue').textContent = `${(stats.total_revenue_eur || 0).toFixed(2)}€`;
             document.getElementById('stat-alerts').textContent = stats.weather_alerts || 0;
@@ -721,9 +744,12 @@
             // Charging Points
             const cpsGrid = document.getElementById('cps-grid');
             const cps = data.cps || [];
+            
+            console.log(`Renderizando ${cps.length} CPs`); // DEBUG
 
             if (cps.length === 0) {
                 cpsGrid.innerHTML = '<div class="no-data">📭 No hay CPs registrados</div>';
+                console.warn('No hay CPs para mostrar');
             } else {
                 cpsGrid.innerHTML = cps.map(cp => {
                     const statusClass = (cp.status || 'DISCONNECTED').toLowerCase();
@@ -759,19 +785,23 @@
                                 <span class="cp-badge">${statusIcon} ${statusText}</span>
                             </div>
                             <div class="cp-info">
-                                📍 ${cp.location}<br>
-                                💰 ${cp.price}€/kWh
+                                📍 ${cp.location || 'Sin ubicación'}<br>
+                                💰 ${cp.price || 0}€/kWh
                                 <strong>${statusText}</strong>
                             </div>
                             ${weatherAlert}
                         </div>
                     `;
                 }).join('');
+                
+                console.log('CPs renderizados correctamente');
             }
 
             // Sesiones Activas
             const sessionsDiv = document.getElementById('active-sessions');
             const sessions = data.active_sessions || [];
+            
+            console.log(`Renderizando ${sessions.length} sesiones activas`); // DEBUG
 
             if (sessions.length === 0) {
                 sessionsDiv.innerHTML = '<div class="no-data">📭 No hay sesiones activas</div>';

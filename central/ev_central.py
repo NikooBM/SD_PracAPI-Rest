@@ -30,8 +30,8 @@ class Database:
     def __init__(self, db_path='evcharging.db'):
         self.db_path = db_path
         self.lock = threading.Lock()
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.execute('PRAGMA journal_mode=WAL')
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+        
         self.conn.row_factory = sqlite3.Row
         cursor = self.conn.cursor()
         
@@ -97,6 +97,15 @@ class Database:
             except Exception as e:
                 logger.error(f"Error guardando CP: {e}")
     
+    def sync_database(self):
+        """Sincronizar la base de datos al disco"""
+        with self.lock:
+            try:
+                self.conn.commit()
+                self.conn.execute('PRAGMA wal_checkpoint(PASSIVE)')
+            except Exception as e:
+                logger.error(f"Error sincronizando BD: {e}")
+                
     def get_all_cps(self) -> List[Dict]:
         with self.lock:
             try:
@@ -250,6 +259,17 @@ class Central:
         self._init_gui()
         return True
     
+    def _database_sync_loop(self):
+        """Loop que sincroniza la BD periódicamente"""
+        while self.running:
+            try:
+                time.sleep(2)
+                self.db.sync_database()
+            except Exception as e:
+                if self.running:
+                    logger.error(f"Error en sync loop: {e}")
+                    time.sleep(2)
+
     def _load_cps_from_db(self):
         cps = self.db.get_all_cps()
         with self.lock:

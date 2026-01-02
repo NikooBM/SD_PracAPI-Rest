@@ -161,11 +161,13 @@ class Driver:
         with self.message_lock:
             self.realtime_data = {
                 'cp_id': cp_id,
-                'kw': data.get('kw', 0.0),
-                'cost': data.get('cost', 0.0),
+                'kw': float(data.get('kw', 0.0)),
+                'cost': float(data.get('cost', 0.0)),
                 'timestamp': time.time()
             }
             self.last_realtime_update = time.time()
+            self.logger.debug(f"Datos en tiempo real actualizados: {self.realtime_data}")
+
 
     def _realtime_display_loop(self):
         """Loop para mostrar datos en tiempo real (NO bloquea input)"""

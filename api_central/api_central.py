@@ -13,6 +13,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+import threading
+import time
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger('API-Central')
@@ -33,7 +35,29 @@ class CentralAPI:
         # Inicializar Kafka Producer
         self.producer = None
         self._init_kafka()
+        
+        self._start_db_sync()
+
     
+    def _start_db_sync(self):
+        """Thread que sincroniza la BD periódicamente"""
+        def sync_loop():
+            while True:
+                try:
+                    time.sleep(1)  # Sincronizar cada segundo
+                    # Forzar commit de cualquier transacción pendiente
+                    conn = self.get_db_connection()
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error en sync loop: {e}")
+                    time.sleep(1)
+        
+        sync_thread = threading.Thread(target=sync_loop, daemon=True)
+        sync_thread.start()
+        logger.info("✅ DB sync thread iniciado")
+
+
     def _init_kafka(self):
         """Inicializar conexión con Kafka"""
         try:
@@ -52,21 +76,22 @@ class CentralAPI:
         conn.row_factory = sqlite3.Row
         return conn
     
-    # ========================================================================
     # MÉTODOS DE CONSULTA
-    # ========================================================================
     
     def get_all_cps(self) -> List[Dict]:
         """Obtener todos los Charging Points"""
         try:
             conn = self.get_db_connection()
+            # Usar WAL mode para mejor concurrencia
+            conn.execute('PRAGMA journal_mode=WAL')
             cursor = conn.cursor()
-            cursor.execute('''SELECT cp_id, location, price, status, last_seen 
-                             FROM charging_points ORDER BY cp_id''')
+            cursor.execute('''SELECT cp_id, location, price, status, last_seen,
+                            registered, authenticated 
+                            FROM charging_points ORDER BY cp_id''')
             cps = [dict(row) for row in cursor.fetchall()]
             conn.close()
             
-            # Añadir alertas climáticas
+            # Alertas climáticas
             for cp in cps:
                 cp_id = cp['cp_id']
                 if cp_id in self.weather_alerts:
@@ -78,6 +103,8 @@ class CentralAPI:
         except Exception as e:
             logger.error(f"❌ Error obteniendo CPs: {e}")
             return []
+
+
     
     def get_cp_by_id(self, cp_id: str) -> Optional[Dict]:
         """Obtener un CP específico"""
@@ -193,9 +220,7 @@ class CentralAPI:
             for cp_id, alert_data in self.weather_alerts.items()
         ]
     
-    # ========================================================================
     # MÉTODOS PARA ALERTAS CLIMÁTICAS
-    # ========================================================================
     
     def process_weather_alert(self, cp_id: str, alert_type: str, 
                              temperature: float, city: str) -> bool:
@@ -259,9 +284,7 @@ api = CentralAPI(
     kafka_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
 )
 
-# ============================================================================
 # ENDPOINTS REST
-# ============================================================================
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -361,9 +384,7 @@ def get_system_status():
         logger.error(f"❌ Error obteniendo estado: {e}")
         return jsonify({'error': str(e)}), 500
 
-# ============================================================================
 # MAIN
-# ============================================================================
 
 if __name__ == '__main__':
     logger.info("="*60)
