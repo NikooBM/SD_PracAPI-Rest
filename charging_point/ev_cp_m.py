@@ -1,6 +1,6 @@
 """
-EV_CP_M - Monitor Completo y Funcional
-Con registro en Registry HTTPS y reconexión automática
+EV_CP_M - Monitor con Autenticación Completa según Enunciado
+Incluye: verificación con Registry, envío de password a Central, re-autenticación
 """
 import socket
 import time
@@ -8,6 +8,7 @@ import os
 import logging
 import requests
 import urllib3
+import threading
 
 # Deshabilitar warnings SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -39,49 +40,84 @@ class CPMonitor:
         self.cp_password = None
         self.cp_token = None
         self.encryption_key = None
+        
+        # Archivos
+        self.key_file = f'/tmp/{cp_id}_encryption_key.txt'
+        self.password_file = f'/tmp/{cp_id}_password.txt'
+        
+        # Para modo interactivo (re-autenticación manual)
+        self.interactive_mode = False
 
-    def start(self) -> bool:
-        """Iniciar Monitor"""
+    def start(self, interactive: bool = False) -> bool:
+        """
+        Iniciar Monitor
+        
+        Args:
+            interactive: Si True, permite comandos interactivos para re-autenticación
+        """
+        self.interactive_mode = interactive
+        
         self.logger.info("="*60)
-        self.logger.info(f"MONITOR {self.cp_id} - VERSIÓN COMPLETA")
+        self.logger.info(f"MONITOR {self.cp_id} - CON AUTENTICACIÓN COMPLETA")
         self.logger.info("="*60)
         
-        # 1. Intentar registro en Registry (opcional)
-        self.logger.info("🔐 Intentando registro en Registry...")
-        try:
-            if self._register_in_registry():
-                self.logger.info("✅ Registro en Registry exitoso")
-            else:
-                self.logger.warning("⚠️ Registry no disponible - Continuando")
-        except Exception as e:
-            self.logger.warning(f"⚠️ Error Registry: {e} - Continuando")
+        # 1. Registro en Registry (obligatorio para obtener credenciales)
+        self.logger.info("🔐 Registrando en Registry para obtener credenciales...")
+        if not self._register_in_registry():
+            self.logger.error("❌ No se pudo obtener credenciales del Registry")
+            self.logger.error("   El CP debe registrarse en Registry antes de conectar a Central")
+            return False
         
         # 2. Esperar a Engine
         self.logger.info("⏳ Esperando Engine...")
         if not self._wait_for_engine(timeout=60):
-            self.logger.error("❌ Engine no responde")
+            self.logger.error("❌ Engine no responde después de 60s")
             return False
         
-        # 3. Registrar en Central
-        self.logger.info("📝 Registrando en Central...")
-        if not self._register_with_central():
-            self.logger.error("❌ No se pudo registrar en Central")
+        # 3. Autenticarse en Central con credenciales del Registry
+        self.logger.info("📝 Autenticando en Central con credenciales del Registry...")
+        if not self._authenticate_with_central():
+            self.logger.error("❌ No se pudo autenticar en Central")
             return False
         
-        self.logger.info(f"✅ Monitor {self.cp_id} listo")
+        # 4. Verificar encryption key
+        if self.encryption_key:
+            if not self._verify_encryption_key_saved():
+                self.logger.error("❌ Encryption key no se guardó correctamente")
+                return False
         
+        self.logger.info(f"✅ Monitor {self.cp_id} listo y autenticado")
+        
+        # 5. Health check loop o modo interactivo
         try:
-            self._health_check_loop()
+            if interactive:
+                self._interactive_loop()
+            else:
+                self._health_check_loop()
         except KeyboardInterrupt:
-            self.logger.info("Interrumpido")
+            self.logger.info("Interrumpido por usuario")
         finally:
             self.shutdown()
         
         return True
 
     def _register_in_registry(self) -> bool:
-        """Registrar CP en Registry"""
+        """
+        Registrar CP en Registry para obtener credenciales (password)
+        Este paso es OBLIGATORIO según el enunciado
+        """
         try:
+            # Intentar cargar password guardado
+            if os.path.exists(self.password_file):
+                try:
+                    with open(self.password_file, 'r') as f:
+                        self.cp_password = f.read().strip()
+                    self.logger.info("✅ Password recuperada de archivo local")
+                    return True
+                except:
+                    pass
+            
+            # Registrarse en Registry
             url = f"{self.registry_url}/api/v1/register"
             payload = {
                 'cp_id': self.cp_id,
@@ -89,62 +125,100 @@ class CPMonitor:
                 'price': self.price
             }
             
+            self.logger.info(f"Conectando a Registry: {url}")
+            
             response = requests.post(
                 url, 
                 json=payload, 
                 verify=False,
-                timeout=10
+                timeout=15
             )
             
             if response.status_code == 201:
                 data = response.json()
                 self.cp_password = data.get('password')
-                self.logger.info(f"✅ CP registrado. Password: {self.cp_password}")
+                self.logger.info(f"✅ CP registrado en Registry")
+                self.logger.info(f"   ⚠️ Password: {self.cp_password}")
+                self.logger.info(f"   ⚠️ GUARDAR ESTA CONTRASEÑA - No se mostrará de nuevo")
                 
                 # Guardar password
                 try:
                     os.makedirs('/tmp', exist_ok=True)
-                    with open(f'/tmp/{self.cp_id}_password.txt', 'w') as f:
+                    with open(self.password_file, 'w') as f:
                         f.write(self.cp_password)
-                except:
-                    pass
+                    self.logger.info("   Password guardada en archivo")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ No se pudo guardar password: {e}")
                 
                 return True
             
             elif response.status_code == 409:
-                # Ya existe
-                self.logger.info("⚠️ CP ya registrado")
-                try:
-                    with open(f'/tmp/{self.cp_id}_password.txt', 'r') as f:
+                # Ya registrado, intentar autenticar para verificar password
+                self.logger.info("⚠️ CP ya registrado en Registry")
+                
+                # Intentar cargar password de archivo
+                if os.path.exists(self.password_file):
+                    with open(self.password_file, 'r') as f:
                         self.cp_password = f.read().strip()
-                    self.logger.info("✅ Password cargada")
-                    return True
-                except FileNotFoundError:
-                    self.logger.warning("⚠️ Password no encontrada")
+                    
+                    # Verificar que la password es válida
+                    if self._verify_password_with_registry():
+                        self.logger.info("✅ Password verificada con Registry")
+                        return True
+                    else:
+                        self.logger.error("❌ Password guardada no es válida")
+                        return False
+                else:
+                    self.logger.error("❌ CP ya registrado pero no hay password guardada")
+                    self.logger.error("   Elimina el CP del Registry o proporciona la password")
                     return False
             
             else:
-                self.logger.warning(f"⚠️ Registry código: {response.status_code}")
+                self.logger.error(f"❌ Registry respondió con código: {response.status_code}")
+                self.logger.error(f"   Respuesta: {response.text[:200]}")
                 return False
         
-        except requests.exceptions.ConnectionError:
-            self.logger.warning("⚠️ No se pudo conectar a Registry")
+        except requests.exceptions.ConnectionError as e:
+            self.logger.error(f"❌ No se pudo conectar a Registry: {e}")
+            self.logger.error("   El Registry debe estar corriendo para obtener credenciales")
             return False
         except requests.exceptions.Timeout:
-            self.logger.warning("⚠️ Timeout Registry")
+            self.logger.error("❌ Timeout conectando a Registry")
             return False
         except Exception as e:
-            self.logger.warning(f"⚠️ Error Registry: {e}")
+            self.logger.error(f"❌ Error en Registry: {e}")
+            return False
+    
+    def _verify_password_with_registry(self) -> bool:
+        """Verificar que la password es válida autenticando con Registry"""
+        try:
+            url = f"{self.registry_url}/api/v1/authenticate"
+            payload = {
+                'cp_id': self.cp_id,
+                'password': self.cp_password
+            }
+            
+            response = requests.post(url, json=payload, verify=False, timeout=10)
+            return response.status_code == 200
+        except:
             return False
     
     def _wait_for_engine(self, timeout: int = 60) -> bool:
         """Esperar a que Engine esté listo"""
         start = time.time()
+        attempts = 0
+        
         while time.time() - start < timeout:
+            attempts += 1
             if self._ping_engine():
-                self.logger.info("✅ Engine disponible")
+                self.logger.info(f"✅ Engine disponible (intento {attempts})")
                 return True
+            
+            if attempts % 10 == 0:
+                self.logger.info(f"   Esperando Engine... ({attempts} intentos)")
+            
             time.sleep(1)
+        
         return False
 
     def _ping_engine(self) -> bool:
@@ -157,11 +231,14 @@ class CPMonitor:
         except:
             return False
 
-    def _register_with_central(self) -> bool:
-        """Registrar en Central"""
+    def _authenticate_with_central(self) -> bool:
+        """
+        Autenticarse en Central enviando las credenciales del Registry
+        Central verificará las credenciales antes de entregar la encryption key
+        """
         for attempt in range(1, 11):
             try:
-                self.logger.info(f"🔄 Intento {attempt}/10 conexión a Central")
+                self.logger.info(f"🔄 Intento {attempt}/10 autenticación en Central")
                 
                 self.central_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.central_socket.settimeout(10)
@@ -169,40 +246,77 @@ class CPMonitor:
                 self.central_socket.connect((self.central_host, self.central_port))
                 self.logger.info(f"✅ Conectado a {self.central_host}:{self.central_port}")
                 
-                message = f"REGISTER|{self.cp_id}|{self.location}|{self.price}"
+                # Enviar mensaje de registro CON PASSWORD del Registry
+                message = f"REGISTER|{self.cp_id}|{self.location}|{self.price}|{self.cp_password}"
                 self.central_socket.sendall(message.encode('utf-8'))
-                self.logger.info(f"📤 Enviado: {message}")
+                self.logger.info(f"📤 Enviando credenciales de Registry...")
                 
                 response = self.central_socket.recv(1024).decode('utf-8').strip()
-                self.logger.info(f"📥 Recibido: {response}")
+                self.logger.info(f"📥 Respuesta de Central: {response[:50]}...")
                 
-                # Extraer encryption_key
+                # Procesar respuesta
                 parts = response.split('|')
-                if len(parts) >= 3 and parts[0] == 'OK':
-                    self.encryption_key = parts[2]
-                    self.logger.info(f"🔑 Encryption key: {self.encryption_key[:20]}...")
-                    
-                    # Guardar para Engine
-                    try:
-                        os.makedirs('/tmp', exist_ok=True)
-                        with open(f'/tmp/{self.cp_id}_encryption_key.txt', 'w') as f:
-                            f.write(self.encryption_key)
-                        self.logger.info("✅ Key guardada para Engine")
-                    except Exception as e:
-                        self.logger.warning(f"⚠️ No se pudo guardar key: {e}")
                 
-                if response.startswith("OK"):
-                    self.logger.info(f"✅ Registrado en Central")
+                if parts[0] == 'OK' and len(parts) >= 3:
+                    # Autenticación exitosa
+                    self.encryption_key = parts[2]
+                    self.logger.info(f"🔑 Encryption key recibida: {self.encryption_key[:20]}...")
+                    
+                    # Guardar encryption key
+                    try:
+                        if self.encryption_key is not None and isinstance(self.encryption_key, str):
+                            os.makedirs('/tmp', exist_ok=True)
+                            with open(self.key_file, 'w') as f:
+                                f.write(self.encryption_key)
+                            
+                            # Verificar escritura
+                            with open(self.key_file, 'r') as f:
+                                saved_key = f.read().strip()
+                            
+                            if saved_key == self.encryption_key:
+                                self.logger.info("✅ Encryption key guardada y verificada")
+                            else:
+                                self.logger.error("❌ Encryption key no se guardó correctamente")
+                                # Reintentar
+                                with open(self.key_file, 'w') as f:
+                                    f.write(self.encryption_key)
+                        else:
+                            self.logger.error("❌ Encryption key es None")
+                            return False
+                    
+                    except Exception as e:
+                        self.logger.error(f"❌ Error guardando encryption key: {e}")
+                        return False
+                    
+                    self.logger.info(f"✅ Autenticado en Central exitosamente")
                     self.central_socket.settimeout(None)
                     return True
+                
+                elif parts[0] == 'ERROR':
+                    error_type = parts[1] if len(parts) > 1 else 'UNKNOWN'
+                    error_msg = parts[2] if len(parts) > 2 else 'Error desconocido'
+                    
+                    self.logger.error(f"❌ Central rechazó autenticación: {error_type}")
+                    self.logger.error(f"   Mensaje: {error_msg}")
+                    
+                    if error_type == 'INVALID_CREDENTIALS':
+                        self.logger.error("   Las credenciales del Registry no son válidas")
+                        self.logger.error("   Verifica que el CP esté registrado en Registry")
+                        return False  # No reintentar, credenciales inválidas
+                    
+                    # Cerrar socket
+                    if self.central_socket:
+                        self.central_socket.close()
+                    self.central_socket = None
+                
                 else:
-                    self.logger.error(f"❌ Central respondió: {response}")
+                    self.logger.error(f"❌ Respuesta inesperada: {response}")
                     if self.central_socket:
                         self.central_socket.close()
                     self.central_socket = None
             
             except socket.timeout:
-                self.logger.error(f"❌ Timeout Central")
+                self.logger.error(f"❌ Timeout conectando a Central")
             except ConnectionRefusedError:
                 self.logger.error(f"❌ Conexión rechazada por Central")
             except Exception as e:
@@ -220,10 +334,93 @@ class CPMonitor:
                 time.sleep(5)
         
         return False
+    
+    def _verify_encryption_key_saved(self) -> bool:
+        """Verificar que la encryption key se guardó correctamente"""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                if os.path.exists(self.key_file):
+                    with open(self.key_file, 'r') as f:
+                        saved_key = f.read().strip()
+                    
+                    if saved_key == self.encryption_key and len(saved_key) > 0:
+                        self.logger.info("✅ Encryption key verificada")
+                        return True
+                    else:
+                        self.logger.warning(f"⚠️ Key guardada no coincide (intento {attempt+1}/{max_attempts})")
+                        if self.encryption_key is not None:
+                            with open(self.key_file, 'w') as f:
+                                f.write(self.encryption_key)
+                        time.sleep(0.5)
+                else:
+                    self.logger.warning(f"⚠️ Archivo de key no existe (intento {attempt+1}/{max_attempts})")
+                    if self.encryption_key is not None:
+                        with open(self.key_file, 'w') as f:
+                            f.write(self.encryption_key)
+                    time.sleep(0.5)
+            except Exception as e:
+                self.logger.error(f"Error verificando key: {e}")
+                time.sleep(0.5)
+        
+        return False
+
+    def re_authenticate(self) -> bool:
+        """
+        RE-AUTENTICARSE en Central
+        Usado cuando Central revoca la encryption key
+        """
+        self.logger.info("="*60)
+        self.logger.info("🔄 INICIANDO RE-AUTENTICACIÓN")
+        self.logger.info("="*60)
+        
+        # Cerrar socket existente
+        if self.central_socket:
+            try:
+                self.central_socket.close()
+            except:
+                pass
+            self.central_socket = None
+        
+        # Limpiar encryption key antigua
+        try:
+            if os.path.exists(self.key_file):
+                os.remove(self.key_file)
+        except:
+            pass
+        
+        self.encryption_key = None
+        
+        # Verificar que tenemos password del Registry
+        if not self.cp_password:
+            self.logger.error("❌ No hay password del Registry")
+            self.logger.error("   Ejecuta primero el registro en Registry")
+            return False
+        
+        # Autenticar de nuevo
+        if self._authenticate_with_central():
+            self.logger.info("="*60)
+            self.logger.info("✅ RE-AUTENTICACIÓN EXITOSA")
+            self.logger.info("="*60)
+            
+            # Reanudar health checks
+            if not self.interactive_mode:
+                threading.Thread(target=self._health_check_loop, daemon=True).start()
+            
+            return True
+        else:
+            self.logger.error("="*60)
+            self.logger.error("❌ RE-AUTENTICACIÓN FALLIDA")
+            self.logger.error("="*60)
+            return False
 
     def _health_check_loop(self):
-        """Loop principal de health checks"""
+        """Loop principal de health checks con detección de revocación"""
         self.logger.info("🩺 Health checks iniciados")
+        
+        reconnect_attempts = 0
+        max_reconnect_attempts = 5
         
         while self.running:
             try:
@@ -243,23 +440,36 @@ class CPMonitor:
                     
                     if self.consecutive_failures >= 3:
                         if self.is_healthy:
-                            self.logger.error("💥 AVERÍA DETECTADA")
+                            self.logger.error("💥 AVERÍA DETECTADA en Engine")
                             self.is_healthy = False
                 
                 # Enviar health a Central
                 if not self._send_health_to_central():
                     self.logger.warning("⚠️ Conexión perdida con Central")
-                    self.logger.info("🔄 Intentando reconectar...")
                     
-                    if not self._register_with_central():
-                        self.logger.error("❌ No se pudo reconectar")
+                    reconnect_attempts += 1
+                    
+                    if reconnect_attempts <= max_reconnect_attempts:
+                        self.logger.info(f"🔄 Intento de re-autenticación {reconnect_attempts}/{max_reconnect_attempts}")
+                        
+                        if self.re_authenticate():
+                            self.logger.info("✅ Re-autenticado en Central")
+                            reconnect_attempts = 0
+                        else:
+                            self.logger.error(f"❌ Falló re-autenticación {reconnect_attempts}")
+                            time.sleep(5)
+                    else:
+                        self.logger.error("❌ Máximo de reintentos alcanzado")
                         break
+                else:
+                    if reconnect_attempts > 0:
+                        reconnect_attempts = 0
                 
                 time.sleep(1)
             
             except Exception as e:
                 if self.running:
-                    self.logger.error(f"❌ Error health loop: {e}")
+                    self.logger.error(f"❌ Error en health loop: {e}")
                     time.sleep(1)
 
     def _check_engine_health(self) -> bool:
@@ -287,6 +497,63 @@ class CPMonitor:
             self.logger.error(f"❌ Error enviando health: {e}")
             return False
 
+    def _interactive_loop(self):
+        """
+        Modo interactivo para pruebas y re-autenticación manual
+        """
+        self.logger.info("\n" + "="*60)
+        self.logger.info("MODO INTERACTIVO")
+        self.logger.info("="*60)
+        self.logger.info("Comandos disponibles:")
+        self.logger.info("  reauth   - Re-autenticarse en Central")
+        self.logger.info("  status   - Ver estado de autenticación")
+        self.logger.info("  health   - Ver estado de health checks")
+        self.logger.info("  quit     - Salir")
+        self.logger.info("="*60 + "\n")
+        
+        # Iniciar health checks en paralelo
+        threading.Thread(target=self._health_check_loop, daemon=True).start()
+        
+        try:
+            while self.running:
+                cmd = input(f"[{self.cp_id}]> ").strip().lower()
+                
+                if cmd == 'reauth':
+                    self.re_authenticate()
+                
+                elif cmd == 'status':
+                    print("\n" + "="*60)
+                    print("ESTADO DE AUTENTICACIÓN")
+                    print("="*60)
+                    print(f"CP ID:              {self.cp_id}")
+                    print(f"Password Registry:  {'✅ Presente' if self.cp_password else '❌ Ausente'}")
+                    print(f"Encryption Key:     {'✅ Presente' if self.encryption_key else '❌ Ausente'}")
+                    print(f"Socket Central:     {'✅ Conectado' if self.central_socket else '❌ Desconectado'}")
+                    
+                    if self.encryption_key:
+                        print(f"Key hash:           {self.encryption_key[:30]}...")
+                    
+                    print("="*60 + "\n")
+                
+                elif cmd == 'health':
+                    engine_ok = self._check_engine_health()
+                    print("\n" + "="*60)
+                    print("ESTADO DE HEALTH")
+                    print("="*60)
+                    print(f"Engine:             {'✅ OK' if engine_ok else '❌ FAIL'}")
+                    print(f"Fallos consecutivos: {self.consecutive_failures}")
+                    print(f"Estado:             {'✅ Healthy' if self.is_healthy else '❌ Broken'}")
+                    print("="*60 + "\n")
+                
+                elif cmd in ('quit', 'exit', 'q'):
+                    break
+                
+                else:
+                    print(f"Comando desconocido: {cmd}")
+        
+        except (KeyboardInterrupt, EOFError):
+            print("\nSaliendo...")
+
     def shutdown(self):
         """Apagar Monitor"""
         self.logger.info("🛑 Apagando Monitor...")
@@ -298,10 +565,19 @@ class CPMonitor:
             except:
                 pass
         
+        # Limpiar archivo de encryption key
+        try:
+            if os.path.exists(self.key_file):
+                os.remove(self.key_file)
+        except:
+            pass
+        
         self.logger.info("✅ Monitor apagado")
 
 
 if __name__ == '__main__':
+    import sys
+    
     cp_id = os.getenv('CP_ID', 'CP001')
     location = os.getenv('CP_LOCATION', 'Ubicación Desconocida')
     price = float(os.getenv('CP_PRICE', '0.50'))
@@ -310,6 +586,9 @@ if __name__ == '__main__':
     engine_host = os.getenv('ENGINE_HOST', 'localhost')
     engine_port = int(os.getenv('ENGINE_PORT', '6000'))
     
+    # Modo interactivo si se pasa argumento --interactive
+    interactive = '--interactive' in sys.argv or '-i' in sys.argv
+    
     monitor = CPMonitor(cp_id, location, price, central_host, central_port, 
                        engine_host, engine_port)
-    monitor.start()
+    monitor.start(interactive=interactive)

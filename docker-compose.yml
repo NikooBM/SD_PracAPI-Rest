@@ -15,10 +15,7 @@ volumes:
   audit_data:
 
 services:
-  # ==================================================================
   # INFRAESTRUCTURA BASE - PC1
-  # ==================================================================
-  
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
@@ -45,7 +42,7 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       
-      # ⚠️ CAMBIAR TU_IP_PC1 por la IP real del PC1
+      # CAMBIAR TU_IP_PC1 por la IP real del PC1 o localhost
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://TU_IP_PC1:9092
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
@@ -83,7 +80,6 @@ services:
       "
 
   # CENTRAL - PC1
-  
   central:
     build: .
     container_name: ev_central
@@ -101,14 +97,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       DB_PATH: /app/data/evcharging.db
       DISPLAY: host.docker.internal:0
-      #${DISPLAY}
+      # Para Linux usar: DISPLAY: ${DISPLAY}
     command: python central/ev_central.py
     restart: unless-stopped
 
-  # ==================================================================
   # REGISTRY - PC1
-  # ==================================================================
-  
   registry:
     build: .
     container_name: ev_registry
@@ -125,10 +118,7 @@ services:
     command: python registry/ev_registry.py
     restart: unless-stopped
 
-  # ==================================================================
   # API_CENTRAL - PC1
-  # ==================================================================
-  
   api_central:
     build: .
     container_name: api_central
@@ -148,10 +138,7 @@ services:
     command: python api_central/api_central.py
     restart: unless-stopped
 
-  # ==================================================================
   # WEATHER - PC1
-  # ==================================================================
-  
   weather:
     build: .
     container_name: ev_w
@@ -170,10 +157,7 @@ services:
     command: python weather/ev_w.py
     restart: unless-stopped
 
-  # ==================================================================
   # FRONT - PC1
-  # ==================================================================
-  
   front:
     image: nginx:alpine
     container_name: ev_front
@@ -184,7 +168,3 @@ services:
     volumes:
       - ./front:/usr/share/nginx/html:ro
     restart: unless-stopped
-  
-  # ==================================================================
-  # NOTA: CPs y Drivers se lanzan desde PC2 y PC3 usando scripts
-  # ==================================================================

@@ -1,6 +1,6 @@
 """
-EV_Driver - Versión Completa y Funcional
-Sin errores de compilación ni ejecución
+EV_Driver
+Módulo principal del Driver de EVCharging
 """
 import json
 import time
@@ -28,21 +28,29 @@ class Driver:
         self.current_service: Optional[Dict[str, Any]] = None
         self.pending_services: List[str] = []
         
-        # Datos en tiempo real
+        # Datos en tiempo real con lock
+        self.realtime_lock = threading.Lock()
         self.realtime_data: Dict[str, Any] = {}
         self.last_realtime_update = 0
         
         self.message_buffer = deque(maxlen=50)
         self.message_lock = threading.Lock()
         
+        # IDs procesados para evitar duplicados
+        self.processed_messages = set()
+        self.processed_lock = threading.Lock()
+        
         # Persistencia
         self.state_file = f'/tmp/driver_{driver_id}_state.pkl'
         
         self.logger = logging.getLogger(f"Driver-{driver_id}")
+        
+        # Flag para mostrar prompt limpio
+        self.show_clean_prompt = threading.Event()
 
     def start(self) -> bool:
         self.logger.info("="*60)
-        self.logger.info(f"DRIVER {self.driver_id} - VERSIÓN COMPLETA")
+        self.logger.info(f"DRIVER {self.driver_id} INICIANDO...")
         self.logger.info("="*60)
         
         self._load_state()
@@ -57,7 +65,6 @@ class Driver:
         if self.current_service:
             self.logger.info(f"📋 Servicio recuperado: {self.current_service}")
         
-        # Thread de datos en tiempo real (NO bloqueante)
         threading.Thread(target=self._realtime_display_loop, daemon=True).start()
         
         self._interactive_mode()
@@ -132,17 +139,19 @@ class Driver:
                     if not self.running:
                         break
                     
-                    data = msg.value
-                    
-                    if msg.topic == 'charging_data':
-                        self._process_realtime_data(data)
-                    elif msg.topic == 'driver_notifications':
-                        if isinstance(data, dict) and data.get('driver_id') == self.driver_id:
-                            self._process_notification(data)
+                    try:
+                        data = msg.value
+                        
+                        if msg.topic == 'charging_data':
+                            self._process_realtime_data(data)
+                        elif msg.topic == 'driver_notifications':
+                            if isinstance(data, dict) and data.get('driver_id') == self.driver_id:
+                                self._process_notification(data)
+                    except Exception as e:
+                        self.logger.error(f"Error procesando mensaje: {e}")
             except Exception as e:
-                if self.running:
-                    if "timed out" not in str(e).lower():
-                        self.logger.error(f"❌ Consumer error: {e}")
+                if self.running and "timed out" not in str(e).lower():
+                    self.logger.error(f"❌ Consumer error: {e}")
                     time.sleep(1)
 
     def _process_realtime_data(self, data: Dict[str, Any]):
@@ -158,7 +167,7 @@ class Driver:
         if self.current_service.get('cp_id') != cp_id:
             return
         
-        with self.message_lock:
+        with self.realtime_lock:
             self.realtime_data = {
                 'cp_id': cp_id,
                 'kw': float(data.get('kw', 0.0)),
@@ -166,38 +175,58 @@ class Driver:
                 'timestamp': time.time()
             }
             self.last_realtime_update = time.time()
-            self.logger.debug(f"Datos en tiempo real actualizados: {self.realtime_data}")
-
 
     def _realtime_display_loop(self):
-        """Loop para mostrar datos en tiempo real (NO bloquea input)"""
+        """Loop para mostrar datos en tiempo real sin bloquear input"""
         last_display = 0
+        last_line_length = 0
         
         while self.running:
             try:
                 current = time.time()
                 
-                with self.message_lock:
+                with self.realtime_lock:
                     if self.realtime_data and self.current_service:
-                        # Mostrar cada 3 segundos
-                        if current - last_display >= 3:
-                            print(f"\r⚡ Cargando: {self.realtime_data['kw']:.2f} kWh | "
-                                  f"{self.realtime_data['cost']:.2f} € | "
-                                  f"CP: {self.realtime_data['cp_id']}", end='', flush=True)
+                        # Mostrar cada 2 segundos
+                        if current - last_display >= 2:
+                            # Limpiar línea anterior
+                            if last_line_length > 0:
+                                print('\r' + ' ' * last_line_length + '\r', end='', flush=True)
+                            
+                            # Mostrar nueva línea
+                            line = f"⚡ Cargando: {self.realtime_data['kw']:.2f} kWh | " \
+                                   f"{self.realtime_data['cost']:.2f} € | " \
+                                   f"CP: {self.realtime_data['cp_id']}"
+                            print(line, end='\r', flush=True)
+                            last_line_length = len(line)
                             last_display = current
                         
                         # Si no hay actualización en 10s, limpiar
                         if current - self.last_realtime_update > 10:
+                            if last_line_length > 0:
+                                print('\r' + ' ' * last_line_length + '\r', end='', flush=True)
+                                last_line_length = 0
                             self.realtime_data = {}
-                            print()
+                            self.show_clean_prompt.set()  # Señalar que se limpió
                 
-                time.sleep(1)
+                time.sleep(0.5)
             except Exception as e:
                 if self.running:
                     pass
 
     def _process_notification(self, data: Dict[str, Any]):
-        """Procesar notificación de Central"""
+        """Procesar notificación de Central (evitar duplicados)"""
+        # Generar ID único para el mensaje
+        msg_id = f"{data.get('status')}_{data.get('cp_id')}_{data.get('session_id', '')}_{int(data.get('timestamp', 0))}"
+        
+        with self.processed_lock:
+            if msg_id in self.processed_messages:
+                return  # Ya procesado
+            self.processed_messages.add(msg_id)
+            # Limitar tamaño del set
+            if len(self.processed_messages) > 100:
+                self.processed_messages.clear()
+        
         timestamp = time.strftime("%H:%M:%S")
         
         with self.message_lock:
@@ -208,18 +237,26 @@ class Driver:
                 msg = f"[{timestamp}] ✅ AUTORIZADO en {cp_id}"
                 self.message_buffer.append(msg)
                 self.current_service = {'cp_id': cp_id, 'status': 'authorized'}
-                self.realtime_data = {}
+                
+                with self.realtime_lock:
+                    self.realtime_data = {}
+                
                 self._save_state()
                 print(f"\n{msg}")
                 print("⏳ Esperando conexión del vehículo...")
+                self.show_clean_prompt.set()
             
             elif status == 'DENIED':
                 msg = f"[{timestamp}] ❌ DENEGADO en {cp_id}: {data.get('message', '')}"
                 self.message_buffer.append(msg)
                 self.current_service = None
-                self.realtime_data = {}
+                
+                with self.realtime_lock:
+                    self.realtime_data = {}
+                
                 self._save_state()
                 print(f"\n{msg}")
+                self.show_clean_prompt.set()
                 self._schedule_next_service()
             
             elif 'kw_total' in data:
@@ -246,8 +283,12 @@ class Driver:
                 self._print_ticket(data, timestamp)
                 
                 self.current_service = None
-                self.realtime_data = {}
+                
+                with self.realtime_lock:
+                    self.realtime_data = {}
+                
                 self._save_state()
+                self.show_clean_prompt.set()
                 self._schedule_next_service()
 
     def _print_ticket(self, data: Dict[str, Any], timestamp: str):
@@ -384,7 +425,7 @@ class Driver:
             print(f"  CP:     {self.current_service.get('cp_id', 'N/A')}")
             print(f"  Estado: {self.current_service.get('status', 'N/A')}")
             
-            with self.message_lock:
+            with self.realtime_lock:
                 if self.realtime_data:
                     print(f"\n📊 Datos en tiempo real:")
                     print(f"  Consumo: {self.realtime_data.get('kw', 0):.2f} kWh")
@@ -421,11 +462,15 @@ class Driver:
         print("="*60)
 
     def _interactive_mode(self):
-        """Modo interactivo"""
         self._show_help()
         
         while self.running:
             try:
+                # Esperar a que se muestre prompt limpio si es necesario
+                if self.show_clean_prompt.is_set():
+                    self.show_clean_prompt.clear()
+                    time.sleep(0.1)
+                
                 prompt = f"\n[{self.driver_id}]> "
                 cmd = input(prompt).strip()
                 

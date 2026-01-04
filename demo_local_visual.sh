@@ -80,6 +80,7 @@ done
 echo "🚗 Lanzando $NUM_DRIVERS Drivers..."
 for i in $(seq 1 $NUM_DRIVERS); do
     DRIVER_ID=$(printf "Driver_%03d" $i)
+    # Docker exige en minúsculas y sin guiones bajos
     CONTAINER_NAME=$(echo $DRIVER_ID | tr '_' '-' | tr '[:upper:]' '[:lower:]')
     
     docker run -d -it \

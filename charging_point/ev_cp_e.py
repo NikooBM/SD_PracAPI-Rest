@@ -1,6 +1,6 @@
 """
-EV_CP_E - Engine Completo y Funcional
-Con persistencia, cifrado y recuperación automática
+EV_CP_E - Engine Corregido
+Correcciones: carga robusta de encryption key, manejo mejorado de sesiones recuperadas, cifrado condicional robusto
 """
 import socket
 import threading
@@ -54,33 +54,42 @@ class ChargingPointEngine:
         
         # Cifrado
         self.encryption_key = None
-        self._load_encryption_key()
+        self.encryption_key_loaded = threading.Event()
 
     def _load_encryption_key(self):
-        """Cargar encryption key del Monitor"""
+        """Cargar encryption key del Monitor con timeout"""
         key_file = f'/tmp/{self.cp_id}_encryption_key.txt'
         
-        for i in range(30):
+        self.logger.info("⏳ Esperando encryption key del Monitor...")
+        
+        for i in range(45):  # 45 segundos de espera
             if os.path.exists(key_file):
                 try:
                     with open(key_file, 'r') as f:
                         self.encryption_key = f.read().strip()
-                    self.logger.info(f"🔑 Key cargada: {self.encryption_key[:20]}...")
-                    return
+                    
+                    if self.encryption_key and len(self.encryption_key) > 0:
+                        self.logger.info(f"🔑 Encryption key cargada: {self.encryption_key[:20]}...")
+                        self.encryption_key_loaded.set()
+                        return True
                 except Exception as e:
-                    self.logger.error(f"❌ Error cargando key: {e}")
+                    self.logger.error(f"❌ Error leyendo key: {e}")
+            
             time.sleep(1)
         
-        self.logger.warning("⚠️ No hay encryption key")
+        self.logger.warning("⚠️ No se pudo cargar encryption key en 45s")
+        self.logger.warning("⚠️ Continuando sin cifrado")
+        self.encryption_key_loaded.set()  # Permitir continuar
+        return False
         
     def start(self) -> bool:
         """Iniciar Engine"""
         self.logger.info("="*60)
-        self.logger.info(f"ENGINE {self.cp_id} - VERSIÓN COMPLETA")
+        self.logger.info(f"ENGINE {self.cp_id}")
         self.logger.info("="*60)
         
         # 1. Cargar sesión guardada
-        self._load_session_backup()
+        recovered_session = self._load_session_backup()
         
         # 2. Iniciar health server
         if not self._init_health_server():
@@ -90,15 +99,53 @@ class ChargingPointEngine:
         if not self._init_kafka():
             return False
         
-        # 4. Enviar sesión recuperada
-        if hasattr(self, 'recovered_session') and self.recovered_session:
-            threading.Timer(3.0, self._send_recovered_session).start()
+        # 4. Cargar encryption key (en paralelo, no bloquea)
+        threading.Thread(target=self._load_encryption_key, daemon=True).start()
+        
+        # 5. Enviar sesión recuperada después de cargar key
+        if recovered_session:
+            threading.Thread(target=self._send_recovered_session_when_ready, 
+                           args=(recovered_session,), daemon=True).start()
         
         self.logger.info(f"✅ Engine {self.cp_id} listo")
         self._interactive_mode()
         return True
 
-    def _load_session_backup(self):
+    def _send_recovered_session_when_ready(self, session: Dict[str, Any]):
+        """Enviar sesión recuperada cuando la key esté lista"""
+        # Esperar a que Kafka esté listo
+        time.sleep(3)
+        
+        # Esperar a que la encryption key esté cargada (o timeout)
+        if not self.encryption_key_loaded.wait(timeout=50):
+            self.logger.warning("⚠️ Timeout esperando encryption key, enviando sin cifrar")
+        
+        try:
+            payload = {
+                'cp_id': self.cp_id,
+                'session_id': session['session_id'],
+                'driver_id': session['driver_id'],
+                'kw_total': session['kw_consumed'],
+                'cost_total': session['total_cost'],
+                'exitosa': False,
+                'razon': session['razon'],
+                'timestamp': time.time()
+            }
+            
+            self._send_kafka('charging_complete', payload, encrypt=True)
+            
+            self.logger.info("✅ Sesión recuperada enviada a Central")
+            
+            # Eliminar backup
+            if os.path.exists(self.session_backup_file):
+                try:
+                    os.remove(self.session_backup_file)
+                except:
+                    pass
+        except Exception as e:
+            self.logger.error(f"❌ Error enviando sesión recuperada: {e}")
+
+    def _load_session_backup(self) -> Optional[Dict[str, Any]]:
         """Cargar sesión guardada"""
         if os.path.exists(self.session_backup_file):
             try:
@@ -115,40 +162,11 @@ class ChargingPointEngine:
                     
                     backup['exitosa'] = False
                     backup['razon'] = 'Engine cayó durante carga'
-                    self.recovered_session = backup
+                    return backup
             except Exception as e:
                 self.logger.error(f"❌ Error cargando backup: {e}")
-                self.recovered_session = None
-        else:
-            self.recovered_session = None
-
-    def _send_recovered_session(self):
-        """Enviar sesión recuperada a Central"""
-        if not hasattr(self, 'recovered_session') or not self.recovered_session:
-            return
         
-        try:
-            payload = {
-                'cp_id': self.cp_id,
-                'session_id': self.recovered_session['session_id'],
-                'driver_id': self.recovered_session['driver_id'],
-                'kw_total': self.recovered_session['kw_consumed'],
-                'cost_total': self.recovered_session['total_cost'],
-                'exitosa': False,
-                'razon': self.recovered_session['razon'],
-                'timestamp': time.time()
-            }
-            
-            self._send_kafka('charging_complete', payload, encrypt=True)
-            
-            self.logger.info("✅ Sesión recuperada enviada")
-            
-            if os.path.exists(self.session_backup_file):
-                os.remove(self.session_backup_file)
-            
-            self.recovered_session = None
-        except Exception as e:
-            self.logger.error(f"❌ Error enviando sesión: {e}")
+        return None
 
     def _save_session_backup(self):
         """Guardar sesión"""
@@ -196,7 +214,7 @@ class ChargingPointEngine:
                 continue
             except Exception as e:
                 if self.running:
-                    self.logger.error(f"❌ Health error: {e}")
+                    pass  # Evitar spam de logs
 
     def _init_kafka(self) -> bool:
         """Inicializar Kafka"""
@@ -249,8 +267,7 @@ class ChargingPointEngine:
                             try:
                                 encrypted_data = data.get('data')
                                 if encrypted_data:
-                                    decrypted_data = CryptoManager.decrypt_json(encrypted_data, self.encryption_key)
-                                    data = decrypted_data
+                                    data = CryptoManager.decrypt_json(encrypted_data, self.encryption_key)
                                 else:
                                     self.logger.error("❌ No encrypted data found")
                                     continue
@@ -263,9 +280,8 @@ class ChargingPointEngine:
                     elif msg.topic == 'central_commands':
                         self._handle_command(data)
             except Exception as e:
-                if self.running:
-                    if "timed out" not in str(e).lower():
-                        self.logger.error(f"❌ Consumer error: {e}")
+                if self.running and "timed out" not in str(e).lower():
+                    self.logger.error(f"❌ Consumer error: {e}")
                     time.sleep(1)
 
     def _handle_authorization(self, data: Dict[str, Any]):
@@ -277,11 +293,11 @@ class ChargingPointEngine:
         
         with self.lock:
             if self.is_stopped_by_central:
-                self.logger.warning("⚠️ CP parado")
+                self.logger.warning("⚠️ CP parado por Central")
                 return
             
             if self.current_session is not None:
-                self.logger.warning("⚠️ Ya hay sesión")
+                self.logger.warning("⚠️ Ya hay sesión activa")
                 return
         
         driver_id = data.get('driver_id', '')
@@ -575,28 +591,7 @@ class ChargingPointEngine:
                 self.charging_active = False
                 time.sleep(0.5)
                 
-                session_id = self.current_session['session_id']
-                driver_id = self.current_session['driver_id']
-                kw_total = self.current_session['kw_consumed']
-                cost_total = self.current_session['total_cost']
-                
-                self._print_ticket(session_id, driver_id, kw_total, cost_total,
-                                 False, 'Avería del Engine')
-                
-                payload = {
-                    'cp_id': self.cp_id, 
-                    'session_id': session_id, 
-                    'driver_id': driver_id,
-                    'kw_total': kw_total, 
-                    'cost_total': cost_total, 
-                    'exitosa': False,
-                    'razon': 'Avería del Engine', 
-                    'timestamp': time.time()
-                }
-                
-                self._send_kafka('charging_complete', payload, encrypt=True)
-                
-                # NO eliminar backup
+                # NO eliminar backup para poder recuperar
                 self.current_session = None
             
             self.state = 'IDLE'
@@ -611,14 +606,9 @@ class ChargingPointEngine:
         
         print("\n🔧 AVERÍA RESUELTA\n")
         self.logger.info("🔧 RESUELTA")
-        
-        # Cargar sesión
-        self._load_session_backup()
-        if hasattr(self, 'recovered_session') and self.recovered_session:
-            self._send_recovered_session()
 
     def _send_kafka(self, topic: str, payload: Dict[str, Any], encrypt: bool = False):
-        """Enviar a Kafka"""
+        """Enviar a Kafka con cifrado condicional robusto"""
         try:
             if self.producer:
                 final_payload = payload
@@ -632,7 +622,8 @@ class ChargingPointEngine:
                             'cp_id': self.cp_id
                         }
                     except Exception as e:
-                        self.logger.warning(f"⚠️ Error cifrando: {e}")
+                        self.logger.warning(f"⚠️ Error cifrando, enviando sin cifrar: {e}")
+                        # Continuar con payload sin cifrar
                 
                 self.producer.send(topic, final_payload)
                 self.producer.flush(timeout=5)

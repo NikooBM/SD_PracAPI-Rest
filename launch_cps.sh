@@ -26,7 +26,6 @@ echo "=============================================="
 for i in $(seq 1 $NUM_CPS); do
     CP_ID=$(printf "CP%03d" $i)
     LOCATION="Punto de Carga $i"
-    # Fijar locale para que el punto decimal funcione
     PRICE=$(LC_NUMERIC=C awk -v i="$i" 'BEGIN{printf "%.2f", 0.40 + i*0.05}')
     ENGINE_PORT=$((6000 + i))
     CONTAINER_NAME="${CP_ID}-engine"

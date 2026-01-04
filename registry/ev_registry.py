@@ -219,9 +219,7 @@ class RegistryDatabase:
 # Instancia global de la base de datos
 db = RegistryDatabase()
 
-# ============================================================================
 # API REST ENDPOINTS
-# ============================================================================
 
 @app.route('/health', methods=['GET'])
 def health_check():
