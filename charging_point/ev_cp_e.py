@@ -351,24 +351,33 @@ class ChargingPointEngine:
         return True
 
     def iniciar_carga_manual(self) -> bool:
-        """Carga manual (emergencia)"""
+        """Carga manual (emergencia) - CORREGIDO para notificar a Central"""
+        # Verificar conexión reciente con Central
         if time.time() - self.last_central_contact > 30:
-            print("\n⚠️ Central no responde. Modo emergencia...")
+            print("\n⚠️ Central no responde hace más de 30s")
+            print("   Iniciando en modo emergencia...")
         else:
-            resp = input("Central activa. ¿Continuar manual? (s/n): ").lower()
+            print(f"\n⚠️ Central activa (último contacto: {int(time.time() - self.last_central_contact)}s)")
+            resp = input("   ¿Continuar con carga manual de emergencia? (s/n): ").lower()
             if resp != 's':
                 return False
         
-        driver_id = input("ID conductor: ").strip()
+        driver_id = input("ID del conductor: ").strip()
         if not driver_id:
+            print("❌ ID de conductor requerido")
             return False
         
         with self.lock:
-            if self.current_session or self.is_stopped_by_central:
-                print("❌ No se puede iniciar manual\n")
+            if self.current_session:
+                print("❌ Ya hay una sesión activa")
                 return False
             
-            session_id = f"MANUAL_{self.cp_id}_{int(time.time())}"
+            if self.is_stopped_by_central:
+                print("❌ CP parado por Central - No se puede iniciar carga manual")
+                return False
+            
+            # Crear sesión manual
+            session_id = f"MANUAL_{self.cp_id}_{int(time.time())}_{os.getpid()}"
             self.state = 'CHARGING'
             self.current_session = {
                 'session_id': session_id, 
@@ -381,15 +390,40 @@ class ChargingPointEngine:
             }
             self.charging_active = True
         
-        print("\n⚡ CARGA MANUAL (EMERGENCIA)")
-        print(f"Driver: {driver_id}")
-        print("👉 Pulsa '2' para finalizar\n")
+        print("\n" + "="*60)
+        print("⚡ CARGA MANUAL INICIADA (MODO EMERGENCIA)")
+        print("="*60)
+        print(f"Driver:  {driver_id}")
+        print(f"Sesión:  {session_id}")
+        print("\n💡 Esta sesión NO está autorizada por Central")
+        print("💡 Pulsa '2' para finalizar")
+        print("="*60 + "\n")
         
+        # CRÍTICO: Notificar a Central si es posible
+        # Esto permite que aparezca en Central y Front
+        if time.time() - self.last_central_contact < 30:
+            try:
+                # Enviar datos de carga inmediatamente
+                payload = {
+                    'cp_id': self.cp_id,
+                    'session_id': session_id,
+                    'driver_id': driver_id,
+                    'kw': 0.0,
+                    'cost': 0.0,
+                    'manual': True,
+                    'timestamp': time.time()
+                }
+                self._send_kafka('charging_data', payload, encrypt=True)
+                self.logger.info("📤 Sesión manual notificada a Central")
+            except:
+                pass
+        
+        # Iniciar thread de carga
         threading.Thread(target=self._charging_loop, daemon=True).start()
         return True
 
     def _charging_loop(self):
-        """Loop de carga"""
+        """Loop de carga - CORREGIDO para manejar cargas manuales"""
         last_log_time = 0
         last_send_time = 0
         
@@ -399,43 +433,55 @@ class ChargingPointEngine:
                     break
                 
                 if self.is_stopped_by_central:
+                    self.logger.warning("⛔ Carga detenida por Central")
                     break
                 
                 # Simular consumo
-                kw_rate = random.uniform(7.0, 22.0) / 3600
+                kw_rate = random.uniform(7.0, 22.0) / 3600  # kW por segundo
                 self.current_session['kw_consumed'] += kw_rate
-                self.current_session['total_cost'] = self.current_session['kw_consumed'] * self.current_session['price']
+                self.current_session['total_cost'] = (
+                    self.current_session['kw_consumed'] * self.current_session['price']
+                )
                 
                 # Guardar backup
                 self._save_session_backup()
                 
-                # Enviar datos cada 2s
+                # Determinar si enviar a Central
                 current_time = time.time()
                 is_manual = self.current_session.get('manual', False)
                 central_alive = (current_time - self.last_central_contact < 30)
                 
-                if (not is_manual or central_alive) and (current_time - last_send_time >= 2):
+                # CRÍTICO: Enviar datos cada 2s (manual o autorizada si Central está viva)
+                should_send = (current_time - last_send_time >= 2)
+                
+                if should_send:
+                    # Enviar siempre, incluso si es manual
+                    # Central/Front decidirán cómo mostrarlo
                     payload = {
                         'cp_id': self.cp_id,
                         'session_id': self.current_session['session_id'],
                         'driver_id': self.current_session['driver_id'],
                         'kw': self.current_session['kw_consumed'],
                         'cost': self.current_session['total_cost'],
+                        'manual': is_manual,
                         'timestamp': time.time()
                     }
                     
                     self._send_kafka('charging_data', payload, encrypt=True)
                     last_send_time = current_time
                 
-                # Log cada 5s
+                # Log local cada 5s
                 if current_time - last_log_time >= 5:
                     elapsed = int(current_time - self.current_session['start_time'])
-                    self.logger.info(f"📊 {self.current_session['kw_consumed']:.2f} kWh | "
-                                   f"{self.current_session['total_cost']:.2f} € | {elapsed}s")
+                    status_icon = "🔧" if is_manual else "⚡"
+                    self.logger.info(
+                        f"{status_icon} {self.current_session['kw_consumed']:.2f} kWh | "
+                        f"{self.current_session['total_cost']:.2f} € | {elapsed}s"
+                    )
                     last_log_time = current_time
             
             time.sleep(1)
-
+        
     def finalizar_carga(self, razon: str = 'Finalizada por conductor') -> bool:
         """Finalizar carga"""
         with self.lock:
@@ -646,76 +692,132 @@ class ChargingPointEngine:
         print("="*60)
     
     def _interactive_mode(self):
-        """Modo interactivo"""
+        """Modo interactivo - CORREGIDO: manejo robusto de 'q' durante carga"""
         self._show_help()
         
         try:
             while self.running:
                 cmd = input(f"\n[{self.cp_id}]> ").strip().lower()
                 
-                if cmd == '1':
+                if not cmd:
+                    continue
+                
+                parts = cmd.split(maxsplit=1)
+                command = parts[0].lower()
+                
+                if command == '1':
                     self.iniciar_carga()
-                elif cmd == '1m':
+                elif command == '1m':
                     self.iniciar_carga_manual()
-                elif cmd == '2':
+                elif command == '2':
                     self.finalizar_carga()
-                elif cmd == '3':
+                elif command == '3':
                     self.simular_averia()
-                elif cmd == '4':
+                elif command == '4':
                     self.resolver_averia()
-                elif cmd == '5':
+                elif command == '5':
                     with self.lock:
                         print("\n" + "="*60)
-                        print("ESTADO")
+                        print("ESTADO DEL ENGINE")
                         print("="*60)
-                        print(f"Estado:   {self.state}")
-                        print(f"Salud:    {'✅ OK' if self.is_healthy else '❌ AVERIADO'}")
-                        print(f"Parado:   {'✅' if self.is_stopped_by_central else '❌'}")
-                        print(f"Cifrado:  {'✅' if self.encryption_key else '❌'}")
+                        print(f"Estado:          {self.state}")
+                        print(f"Salud:           {'✅ OK' if self.is_healthy else '❌ AVERIADO'}")
+                        print(f"Parado Central:  {'✅ Sí' if self.is_stopped_by_central else '❌ No'}")
+                        print(f"Cifrado:         {'✅ Activo' if self.encryption_key else '❌ Sin clave'}")
                         
                         if self.current_session:
-                            print(f"\n📋 SESIÓN:")
-                            print(f"  ID:      {self.current_session['session_id']}")
-                            print(f"  Driver:  {self.current_session['driver_id']}")
-                            print(f"  Consumo: {self.current_session['kw_consumed']:.2f} kWh")
-                            print(f"  Coste:   {self.current_session['total_cost']:.2f} €")
+                            print(f"\n🔋 SESIÓN ACTIVA:")
+                            print(f"  ID:          {self.current_session['session_id']}")
+                            print(f"  Driver:      {self.current_session['driver_id']}")
+                            print(f"  Consumo:     {self.current_session['kw_consumed']:.2f} kWh")
+                            print(f"  Coste:       {self.current_session['total_cost']:.2f} €")
+                            print(f"  Manual:      {'✅ Sí' if self.current_session.get('manual') else '❌ No'}")
                         else:
-                            print("\n📋 Sin sesión")
+                            print("\n🔋 Sin sesión activa")
+                        
+                        # Info de backup
+                        if os.path.exists(self.session_backup_file):
+                            print("\n💾 Hay sesión guardada en disco")
+                        
                         print("="*60 + "\n")
-                elif cmd == 'help':
+                
+                elif command == 'help':
                     self._show_help()
-                elif cmd in ('q', 'quit', 'exit'):
-                    break
+                
+                elif command in ('q', 'quit', 'exit'):
+                    # CRÍTICO: Manejo correcto de salida durante carga
+                    with self.lock:
+                        if self.state == 'CHARGING' and self.current_session:
+                            print("\n⚠️ HAY UNA CARGA EN PROGRESO")
+                            resp = input("¿Detener carga y salir? (s/n): ").lower()
+                            
+                            if resp == 's':
+                                print("\n🛑 Deteniendo carga...")
+                                self.charging_active = False
+                                time.sleep(0.5)
+                                
+                                # Guardar backup ANTES de salir
+                                self._save_session_backup()
+                                
+                                # NO notificar a Central - dejar que se recupere al reiniciar
+                                self.logger.info("💾 Sesión guardada para recuperación")
+                                break
+                            else:
+                                print("Cancelado. Carga continúa.")
+                                continue
+                        else:
+                            break
+            
         except (KeyboardInterrupt, EOFError):
-            print("\n\n🛑 Saliendo...\n")
+            print("\n\n🛑 Interrupción detectada...")
+            
+            # CRÍTICO: Guardar sesión si existe
+            with self.lock:
+                if self.state == 'CHARGING' and self.current_session:
+                    print("💾 Guardando sesión en progreso...")
+                    self.charging_active = False
+                    time.sleep(0.5)
+                    self._save_session_backup()
+                    self.logger.info("✅ Sesión guardada para recuperación posterior")
+        
         finally:
             self.shutdown()
-
+        
     def shutdown(self):
-        """Apagar Engine"""
+        """Apagar Engine - CORREGIDO: preservar sesión activa"""
+        self.logger.info("🛑 Apagando Engine...")
         self.running = False
         self.charging_active = False
         
-        if self.current_session:
-            self._save_session_backup()
+        # CRÍTICO: Guardar sesión activa antes de cerrar
+        with self.lock:
+            if self.current_session:
+                try:
+                    self._save_session_backup()
+                    self.logger.info("💾 Sesión guardada en backup para recuperación")
+                except Exception as e:
+                    self.logger.error(f"❌ Error guardando sesión: {e}")
         
+        # Cerrar conexiones
         if self.health_server:
             try:
                 self.health_server.close()
             except:
                 pass
+        
         if self.consumer:
             try:
                 self.consumer.close()
             except:
                 pass
+        
         if self.producer:
             try:
                 self.producer.close()
             except:
                 pass
         
-        self.logger.info("✅ Engine apagado")
+        self.logger.info("✅ Engine apagado correctamente")
 
 
 if __name__ == '__main__':

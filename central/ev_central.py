@@ -202,33 +202,44 @@ class CPWidget(tk.Frame):
         self.pack_propagate(False)
     
     def actualizar(self, status: str, driver_id: str = "", kw: float = 0.0, 
-                   cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget (debe llamarse desde thread principal)"""
+                cost: float = 0.0, authenticated: bool = False):
+        """Actualizar widget - CORREGIDO: orden correcto de etiquetas"""
         try:
             color = self.COLORS.get(status, '#95a5a6')
             self.config(bg=color)
             self._update_bg_recursive(self, color)
             
-            texto = {'AVAILABLE': 'DISPONIBLE', 'CHARGING': '', 
-                    'STOPPED': 'FUERA DE SERVICIO',
-                    'BROKEN': 'AVERIADO', 'DISCONNECTED': 'DESCONECTADO'}
-            self.lbl_estado.config(text=texto.get(status, status))
+            # Textos de estado
+            texto = {
+                'AVAILABLE': 'DISPONIBLE', 
+                'CHARGING': 'CARGANDO...', 
+                'STOPPED': 'FUERA DE SERVICIO',
+                'BROKEN': 'AVERIADO', 
+                'DISCONNECTED': 'DESCONECTADO'
+            }
             
+            # CRÍTICO: Mostrar autenticación PRIMERO (arriba)
             if authenticated:
-                self.lbl_auth.config(text="🔐 Autenticado")
+                self.lbl_auth.config(text="🔒 Autenticado")
             else:
                 self.lbl_auth.config(text="⚠️ Sin autenticar")
             
+            # CRÍTICO: Estado DESPUÉS (abajo)
             if status == 'CHARGING' and driver_id:
-                self.lbl_driver.config(text=f"Driver: {driver_id}")
-                self.lbl_consumo.config(text=f"{kw:.2f} kWh")
-                self.lbl_coste.config(text=f"{cost:.2f} €")
-                self.frame_carga.pack(pady=5)
+                # Durante carga: mostrar datos en tiempo real
+                self.lbl_driver.config(text=f"👤 {driver_id}")
+                self.lbl_consumo.config(text=f"⚡ {kw:.2f} kWh")
+                self.lbl_coste.config(text=f"💶 {cost:.2f} €")
+                
+                # Ocultar label de estado, mostrar frame de carga
                 self.lbl_estado.pack_forget()
+                self.frame_carga.pack(pady=5)
             else:
+                # No está cargando: mostrar estado
                 self.frame_carga.pack_forget()
-                if status in ['BROKEN', 'DISCONNECTED', 'STOPPED']:
-                    self.lbl_estado.pack(pady=10)
+                self.lbl_estado.config(text=texto.get(status, status))
+                self.lbl_estado.pack(pady=10)
+            
         except Exception as e:
             logger.error(f"Error actualizando widget {self.cp_id}: {e}")
     
@@ -538,9 +549,10 @@ class Central:
                 pass
     
     def _monitor_health_loop(self, cp_id: str, sock: socket.socket):
-        """Loop de health checks"""
+        """Loop de health checks - CORREGIDO: detección robusta de averías"""
         sock.settimeout(15)
         last_health_ok = time.time()
+        last_failure_log = 0  # Para evitar spam de logs
         
         while self.running:
             try:
@@ -557,18 +569,22 @@ class Central:
                 
                 if msg == 'HEALTH_OK':
                     last_health_ok = time.time()
+                    
                     with self.lock:
                         if cp_id in self.charging_points:
                             cp_data = self.charging_points[cp_id]
                             cp_data['engine_alive'] = True
                             cp_data['consecutive_failures'] = 0
                             
+                            # CRÍTICO: Recuperar de BROKEN solo UNA VEZ
                             if cp_data['status'] == 'BROKEN':
+                                # Aplicar comando pendiente si existe
                                 if cp_id in self.pending_commands:
                                     cmd = self.pending_commands.pop(cp_id)
                                     self._send_kafka('central_commands', 
-                                                   {'cp_id': cp_id, 'command': cmd, 'timestamp': time.time()}, 
-                                                   encrypt_for_cp=cp_id)
+                                                {'cp_id': cp_id, 'command': cmd, 
+                                                    'timestamp': time.time()}, 
+                                                encrypt_for_cp=cp_id)
                                     cp_data['status'] = 'STOPPED' if cmd == 'STOP' else 'AVAILABLE'
                                 else:
                                     cp_data['status'] = 'AVAILABLE'
@@ -576,26 +592,45 @@ class Central:
                                 self._enqueue_gui_action('update_cp', cp_id, cp_data['status'], 
                                                         '', 0, 0, cp_data.get('authenticated', False))
                                 self.db.update_cp_status(cp_id, cp_data['status'])
-                                self._enqueue_gui_action('log', f"✅ {cp_id} recuperado")
+                                self._enqueue_gui_action('log', f"✅ {cp_id} recuperado de avería")
+                                self.logger.info(f"✅ {cp_id} recuperado de BROKEN")
                 
                 elif msg == 'HEALTH_FAIL':
+                    current_time = time.time()
+                    
                     with self.lock:
                         if cp_id in self.charging_points:
                             cp_data = self.charging_points[cp_id]
                             cp_data['engine_alive'] = False
                             cp_data['consecutive_failures'] += 1
                             
-                            if cp_data['monitor_alive'] and cp_data['consecutive_failures'] >= 3:
+                            # CRÍTICO: Solo marcar como BROKEN al alcanzar 3 fallos
+                            # Y solo procesarlo UNA VEZ
+                            if (cp_data['consecutive_failures'] >= 3 and 
+                                cp_data['monitor_alive'] and 
+                                cp_data['status'] != 'BROKEN'):
+                                
+                                # Log solo si han pasado 5s desde último log (evitar spam)
+                                if current_time - last_failure_log > 5:
+                                    self.logger.warning(
+                                        f"⚠️ {cp_id}: {cp_data['consecutive_failures']} fallos consecutivos"
+                                    )
+                                    last_failure_log = current_time
+                                
+                                # Marcar como averiado
                                 self._handle_cp_failure(cp_id)
+            
             except socket.timeout:
                 if time.time() - last_health_ok > 20:
+                    self.logger.warning(f"⏰ Timeout health check: {cp_id}")
                     break
                 continue
+            
             except Exception as e:
                 if self.running:
-                    self.logger.error(f"❌ Health {cp_id}: {e}")
+                    self.logger.error(f"❌ Health loop error {cp_id}: {e}")
                 break
-    
+            
     def _decrypt_message(self, data: Dict[str, Any], cp_id: str) -> Optional[Dict[str, Any]]:
         """Descifrar mensaje si está cifrado"""
         if not isinstance(data, dict):
@@ -668,7 +703,7 @@ class Central:
             self._enqueue_gui_action('log', f"✅ {driver_id} en {cp_id}")
     
     def _handle_charging_data(self, data: Dict[str, Any]):
-        """Handler de datos de carga"""
+        """Handler de datos de carga - CORREGIDO para actualizar BD en tiempo real"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -681,15 +716,31 @@ class Central:
             if cp_id in self.charging_points:
                 cp = self.charging_points[cp_id]
                 if cp.get('session'):
+                    # Actualizar sesión en memoria
                     cp['session']['kw_consumed'] = data.get('kw', 0.0)
                     cp['session']['total_cost'] = data.get('cost', 0.0)
+                    
+                    # CRÍTICO: Actualizar también en base de datos
+                    try:
+                        session_id = cp['session'].get('session_id')
+                        if session_id:
+                            cursor = self.db.conn.cursor()
+                            cursor.execute('''UPDATE sessions 
+                                            SET kw_consumed = ?, total_cost = ? 
+                                            WHERE session_id = ?''',
+                                        (data.get('kw', 0.0), data.get('cost', 0.0), session_id))
+                            self.db.conn.commit()
+                    except Exception as e:
+                        self.logger.error(f"Error actualizando sesión en BD: {e}")
+                    
+                    # Actualizar GUI con progreso
                     self._enqueue_gui_action('update_cp', cp_id, 'CHARGING', 
                                             data.get('driver_id', ''),
                                             data.get('kw', 0.0), data.get('cost', 0.0),
                                             cp.get('authenticated', False))
-    
+                    
     def _handle_charging_complete(self, data: Dict[str, Any]):
-        """Handler de finalización de carga"""
+        """Handler de finalización de carga - CORREGIDO para limpiar correctamente"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -703,31 +754,62 @@ class Central:
         exitosa = data.get('exitosa', True)
         razon = data.get('razon', '')
         
+        self.logger.info(f"📋 Finalizando sesión {session_id}: {cp_id}")
+        
         with self.lock:
             if cp_id in self.charging_points:
                 cp = self.charging_points[cp_id]
+                
+                # Guardar sesión completa
                 if cp.get('session'):
                     session = cp['session']
-                    session.update({'end_time': int(time.time()), 'cp_id': cp_id,
-                                   'exitosa': exitosa, 'razon': razon})
+                    session.update({
+                        'end_time': int(time.time()), 
+                        'cp_id': cp_id,
+                        'kw_consumed': data.get('kw_total', session.get('kw_consumed', 0)),
+                        'total_cost': data.get('cost_total', session.get('total_cost', 0)),
+                        'exitosa': exitosa, 
+                        'razon': razon
+                    })
                     self.db.save_session(session)
+                    self.logger.info(f"✅ Sesión guardada: {session_id}")
                 
+                # Limpiar sesión del CP
                 cp['session'] = None
+                
+                # Actualizar estado del CP
                 if cp['status'] in ['CHARGING', 'AVAILABLE']:
-                    cp['status'] = 'AVAILABLE'
-                    self._enqueue_gui_action('update_cp', cp_id, 'AVAILABLE', '', 0, 0, 
-                                            cp.get('authenticated', False))
-                    self.db.update_cp_status(cp_id, 'AVAILABLE')
+                    # No cambiar si está STOPPED o BROKEN
+                    if cp['status'] == 'CHARGING':
+                        cp['status'] = 'AVAILABLE'
+                        self.db.update_cp_status(cp_id, 'AVAILABLE')
+                
+                # Actualizar GUI
+                self._enqueue_gui_action('update_cp', cp_id, cp['status'], '', 0, 0, 
+                                        cp.get('authenticated', False))
             
+            # Limpiar de ongoing sessions
             if session_id in self.sessions:
                 del self.sessions[session_id]
+                # CRÍTICO: Eliminar de la tabla visual
                 self._enqueue_gui_action('remove_request', session_id)
+                self.logger.info(f"🗑️ Sesión {session_id} eliminada de ongoing")
         
+        # Enviar ticket final al driver
         self._send_kafka('driver_notifications', {
-            'driver_id': driver_id, 'cp_id': cp_id, 'session_id': session_id,
-            'kw_total': data.get('kw_total', 0), 'cost_total': data.get('cost_total', 0),
-            'exitosa': exitosa, 'razon': razon, 'type': 'FINAL_TICKET', 'timestamp': time.time()
+            'driver_id': driver_id, 
+            'cp_id': cp_id, 
+            'session_id': session_id,
+            'kw_total': data.get('kw_total', 0), 
+            'cost_total': data.get('cost_total', 0),
+            'exitosa': exitosa, 
+            'razon': razon, 
+            'type': 'FINAL_TICKET', 
+            'timestamp': time.time()
         })
+        
+        self.logger.info(f"✅ Carga completada: {session_id}")
+    
     def revoke_cp_encryption_key(self, cp_id: str):
         """Revocar encryption key de un CP"""
         with self.lock:
@@ -811,37 +893,51 @@ class Central:
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
     
     def _send_command(self, cp_id: str, command: str):
-        """Enviar comando a CP"""
+        """Enviar comando a CP - CORREGIDO para notificar estado"""
         with self.lock:
             if cp_id not in self.charging_points:
+                self.logger.warning(f"⚠️ CP {cp_id} no existe")
                 return
             
             cp_data = self.charging_points[cp_id]
             self.pending_commands[cp_id] = command
             
             if command == 'STOP':
+                # Finalizar sesión activa si existe
                 if cp_data.get('session'):
-                    self._abort_session(cp_id, 'Detenido por Central')
+                    self._abort_session(cp_id, 'Detenido por Central (comando STOP)')
+                
+                # Cambiar estado
                 old_status = cp_data['status']
                 cp_data['status'] = 'STOPPED'
+                
+                # CRÍTICO: Actualizar GUI con estado STOPPED
                 self._enqueue_gui_action('update_cp', cp_id, 'STOPPED', '', 0, 0, 
                                         cp_data.get('authenticated', False))
+                self._enqueue_gui_action('log', f"⛔ {cp_id} PARADO por Central")
+                
+                self.db.update_cp_status(cp_id, 'STOPPED')
                 self.audit.log_cp_status_change(cp_id, old_status, 'STOPPED', f'Command: {command}')
+                
             elif command == 'RESUME':
                 old_status = cp_data['status']
                 cp_data['status'] = 'AVAILABLE'
+                
+                # CRÍTICO: Actualizar GUI con estado AVAILABLE
                 self._enqueue_gui_action('update_cp', cp_id, 'AVAILABLE', '', 0, 0, 
                                         cp_data.get('authenticated', False))
+                self._enqueue_gui_action('log', f"▶️ {cp_id} REANUDADO por Central")
+                
+                self.db.update_cp_status(cp_id, 'AVAILABLE')
                 self.audit.log_cp_status_change(cp_id, old_status, 'AVAILABLE', f'Command: {command}')
-            
-            self.db.update_cp_status(cp_id, cp_data['status'])
         
+        # Enviar comando por Kafka
         self._send_kafka('central_commands', 
                         {'cp_id': cp_id, 'command': command, 'timestamp': time.time()},
                         encrypt_for_cp=cp_id)
         
         self.audit.log_command(cp_id, command)
-        self._enqueue_gui_action('log', f"📤 {command} → {cp_id}")
+        self.logger.info(f"📤 Comando {command} enviado a {cp_id}")
     
     def _abort_session(self, cp_id: str, razon: str):
         """Abortar sesión"""
@@ -869,7 +965,7 @@ class Central:
         self.audit.log_error('SESSION_ABORTED', cp_id, f'Razón: {razon}')
     
     def _handle_cp_failure(self, cp_id: str):
-        """Manejar fallo de CP"""
+        """Manejar fallo de CP - CORREGIDO para evitar spam de avisos"""
         with self.lock:
             if cp_id not in self.charging_points:
                 return
@@ -878,20 +974,29 @@ class Central:
             if not cp.get('monitor_alive'):
                 return
             
+            # CRÍTICO: Solo procesar si no está ya en estado BROKEN
+            if cp['status'] == 'BROKEN':
+                return  # Ya está marcado como averiado, no hacer nada más
+            
             old_status = cp['status']
             cp['status'] = 'BROKEN'
             cp['engine_alive'] = False
             
+            # Abortar sesión si existe
             if cp.get('session'):
                 self._abort_session(cp_id, 'Avería del Engine')
             
+            # Actualizar GUI UNA SOLA VEZ
             self._enqueue_gui_action('update_cp', cp_id, 'BROKEN', '', 0, 0, 
                                     cp.get('authenticated', False))
             self.db.update_cp_status(cp_id, 'BROKEN')
             self._enqueue_gui_action('log', f"💥 {cp_id} AVERIADO")
             
+            # Auditar UNA SOLA VEZ
             self.audit.log_cp_status_change(cp_id, old_status, 'BROKEN', 
-                                           'Consecutive Engine failures')
+                                        'Consecutive Engine failures')
+            
+            self.logger.warning(f"💥 CP {cp_id} marcado como AVERIADO")
     
     def _monitor_connections(self):
         """Monitor de timeouts"""

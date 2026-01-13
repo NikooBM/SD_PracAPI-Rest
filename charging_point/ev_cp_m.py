@@ -50,7 +50,7 @@ class CPMonitor:
 
     def start(self, interactive: bool = False) -> bool:
         """
-        Iniciar Monitor
+        Iniciar Monitor - CORREGIDO: verificar encryption key persistente
         
         Args:
             interactive: Si True, permite comandos interactivos para re-autenticación
@@ -58,24 +58,69 @@ class CPMonitor:
         self.interactive_mode = interactive
         
         self.logger.info("="*60)
-        self.logger.info(f"MONITOR {self.cp_id} - CON AUTENTICACIÓN COMPLETA")
+        self.logger.info(f"MONITOR {self.cp_id} - VERSIÓN CORREGIDA")
         self.logger.info("="*60)
         
-        # 1. Registro en Registry (obligatorio para obtener credenciales)
+        # 1. Verificar si hay credenciales guardadas
+        self.logger.info("🔍 Verificando credenciales guardadas...")
+        
+        has_password = os.path.exists(self.password_file)
+        has_key = os.path.exists(self.key_file)
+        
+        if has_password and has_key:
+            # CRÍTICO: Intentar cargar credenciales existentes
+            try:
+                with open(self.password_file, 'r') as f:
+                    self.cp_password = f.read().strip()
+                with open(self.key_file, 'r') as f:
+                    self.encryption_key = f.read().strip()
+                
+                if self.cp_password and self.encryption_key:
+                    self.logger.info("✅ Credenciales recuperadas de archivos locales")
+                    self.logger.info("   Intentando conectar directamente...")
+                    
+                    # 2. Esperar Engine
+                    self.logger.info("⏳ Esperando Engine...")
+                    if not self._wait_for_engine(timeout=60):
+                        self.logger.error("❌ Engine no responde")
+                        return False
+                    
+                    # 3. Conectar a Central con credenciales existentes
+                    if self._authenticate_with_central():
+                        self.logger.info(f"✅ Monitor {self.cp_id} listo (credenciales recuperadas)")
+                        
+                        # 4. Health check loop o modo interactivo
+                        try:
+                            if interactive:
+                                self._interactive_loop()
+                            else:
+                                self._health_check_loop()
+                        except KeyboardInterrupt:
+                            self.logger.info("Interrumpido por usuario")
+                        finally:
+                            self.shutdown()
+                        
+                        return True
+                    else:
+                        self.logger.warning("⚠️ Credenciales guardadas no funcionan")
+                        self.logger.warning("   Procediendo a re-registro...")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Error cargando credenciales: {e}")
+        
+        # Si no hay credenciales o no funcionan, proceder con registro normal
         self.logger.info("🔐 Registrando en Registry para obtener credenciales...")
         if not self._register_in_registry():
             self.logger.error("❌ No se pudo obtener credenciales del Registry")
-            self.logger.error("   El CP debe registrarse en Registry antes de conectar a Central")
             return False
         
-        # 2. Esperar a Engine
+        # 2. Esperar Engine
         self.logger.info("⏳ Esperando Engine...")
         if not self._wait_for_engine(timeout=60):
             self.logger.error("❌ Engine no responde después de 60s")
             return False
         
-        # 3. Autenticarse en Central con credenciales del Registry
-        self.logger.info("📝 Autenticando en Central con credenciales del Registry...")
+        # 3. Autenticar en Central
+        self.logger.info("🔐 Autenticando en Central...")
         if not self._authenticate_with_central():
             self.logger.error("❌ No se pudo autenticar en Central")
             return False
@@ -416,11 +461,10 @@ class CPMonitor:
             return False
 
     def _health_check_loop(self):
-        """Loop principal de health checks con detección de revocación"""
+        """Loop principal de health checks - CORREGIDO: NO re-autenticación automática"""
         self.logger.info("🩺 Health checks iniciados")
         
-        reconnect_attempts = 0
-        max_reconnect_attempts = 5
+        consecutive_connection_failures = 0
         
         while self.running:
             try:
@@ -445,25 +489,30 @@ class CPMonitor:
                 
                 # Enviar health a Central
                 if not self._send_health_to_central():
-                    self.logger.warning("⚠️ Conexión perdida con Central")
+                    consecutive_connection_failures += 1
                     
-                    reconnect_attempts += 1
+                    if consecutive_connection_failures == 1:
+                        self.logger.warning("⚠️ Conexión perdida con Central")
                     
-                    if reconnect_attempts <= max_reconnect_attempts:
-                        self.logger.info(f"🔄 Intento de re-autenticación {reconnect_attempts}/{max_reconnect_attempts}")
+                    # CRÍTICO: NO RE-AUTENTICARSE AUTOMÁTICAMENTE
+                    # Según PDF: "debe ser algo manual"
+                    if consecutive_connection_failures >= 5:
+                        self.logger.error("❌ Conexión con Central perdida definitivamente")
+                        self.logger.error("   Ejecuta comando 'reauth' para re-autenticarse")
                         
-                        if self.re_authenticate():
-                            self.logger.info("✅ Re-autenticado en Central")
-                            reconnect_attempts = 0
-                        else:
-                            self.logger.error(f"❌ Falló re-autenticación {reconnect_attempts}")
+                        # En modo interactivo, el usuario usa el comando
+                        # En modo no-interactivo, simplemente esperar
+                        if not self.interactive_mode:
+                            # Esperar sin intentar re-autenticar
                             time.sleep(5)
-                    else:
-                        self.logger.error("❌ Máximo de reintentos alcanzado")
-                        break
+                    
+                    time.sleep(2)
+                    continue
                 else:
-                    if reconnect_attempts > 0:
-                        reconnect_attempts = 0
+                    # Conexión OK
+                    if consecutive_connection_failures > 0:
+                        self.logger.info("✅ Conexión con Central restaurada")
+                        consecutive_connection_failures = 0
                 
                 time.sleep(1)
             
@@ -471,7 +520,7 @@ class CPMonitor:
                 if self.running:
                     self.logger.error(f"❌ Error en health loop: {e}")
                     time.sleep(1)
-
+                
     def _check_engine_health(self) -> bool:
         """Verificar salud de Engine"""
         try:
@@ -555,7 +604,7 @@ class CPMonitor:
             print("\nSaliendo...")
 
     def shutdown(self):
-        """Apagar Monitor"""
+        """Apagar Monitor - CORREGIDO: NO eliminar encryption key automáticamente"""
         self.logger.info("🛑 Apagando Monitor...")
         self.running = False
         
@@ -565,12 +614,9 @@ class CPMonitor:
             except:
                 pass
         
-        # Limpiar archivo de encryption key
-        try:
-            if os.path.exists(self.key_file):
-                os.remove(self.key_file)
-        except:
-            pass
+        # CRÍTICO: NO eliminar encryption key para permitir reconexión
+        # Solo eliminarla cuando se revoca explícitamente
+        self.logger.info("💾 Encryption key preservada para próxima reconexión")
         
         self.logger.info("✅ Monitor apagado")
 

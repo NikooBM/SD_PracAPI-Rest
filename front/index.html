@@ -712,134 +712,214 @@
         }
 
 
-        function renderData(data) {
-            console.log('Renderizando datos:', data); // DEBUG
-            
-            // Verificar que data existe y tiene las propiedades necesarias
-            if (!data) {
-                console.error('No hay datos para renderizar');
-                showError('No se recibieron datos del servidor');
-                return;
-            }
-            
-            // Estadísticas con valores por defecto
-            const stats = data.stats || {};
-            document.getElementById('stat-total-cps').textContent = stats.total_cps || 0;
-            document.getElementById('stat-available').textContent = (stats.cps_by_status && stats.cps_by_status.AVAILABLE) || 0;
-            document.getElementById('stat-charging').textContent = (stats.cps_by_status && stats.cps_by_status.CHARGING) || 0;
-            document.getElementById('stat-energy').textContent = (stats.total_energy_kwh || 0).toFixed(1);
-            document.getElementById('stat-revenue').textContent = `${(stats.total_revenue_eur || 0).toFixed(2)}€`;
-            document.getElementById('stat-alerts').textContent = stats.weather_alerts || 0;
+function renderData(data) {
+    console.log('Renderizando datos:', data);
+    
+    if (!data) {
+        console.error('No hay datos para renderizar');
+        showError('No se recibieron datos del servidor');
+        return;
+    }
+    
+    // ESTADÍSTICAS
+    const stats = data.stats || {};
+    document.getElementById('stat-total-cps').textContent = stats.total_cps || 0;
+    document.getElementById('stat-available').textContent = (stats.cps_by_status && stats.cps_by_status.AVAILABLE) || 0;
+    document.getElementById('stat-charging').textContent = (stats.cps_by_status && stats.cps_by_status.CHARGING) || 0;
+    document.getElementById('stat-energy').textContent = (stats.total_energy_kwh || 0).toFixed(1);
+    document.getElementById('stat-revenue').textContent = `${(stats.total_revenue_eur || 0).toFixed(2)}€`;
+    document.getElementById('stat-alerts').textContent = stats.weather_alerts || 0;
 
-            // Alertas Banner
-            const alertsBanner = document.getElementById('alerts-banner');
-            if (stats.weather_alerts > 0) {
-                alertsBanner.style.display = 'flex';
-                document.getElementById('alerts-summary').textContent = 
-                    `${stats.weather_alerts} CP${stats.weather_alerts > 1 ? 's' : ''} afectado${stats.weather_alerts > 1 ? 's' : ''} por condiciones climáticas adversas`;
-            } else {
-                alertsBanner.style.display = 'none';
-            }
+    // ALERTAS BANNER
+    const alertsBanner = document.getElementById('alerts-banner');
+    if (stats.weather_alerts > 0) {
+        alertsBanner.style.display = 'flex';
+        document.getElementById('alerts-summary').textContent = 
+            `${stats.weather_alerts} CP${stats.weather_alerts > 1 ? 's' : ''} afectado${stats.weather_alerts > 1 ? 's' : ''} por condiciones climáticas adversas`;
+    } else {
+        alertsBanner.style.display = 'none';
+    }
 
-            // Charging Points
-            const cpsGrid = document.getElementById('cps-grid');
-            const cps = data.cps || [];
-            
-            console.log(`Renderizando ${cps.length} CPs`); // DEBUG
+    // CHARGING POINTS
+    const cpsGrid = document.getElementById('cps-grid');
+    const cps = data.cps || [];
 
-            if (cps.length === 0) {
-                cpsGrid.innerHTML = '<div class="no-data">📭 No hay CPs registrados</div>';
-                console.warn('No hay CPs para mostrar');
-            } else {
-                cpsGrid.innerHTML = cps.map(cp => {
-                    const statusClass = (cp.status || 'DISCONNECTED').toLowerCase();
-                    const statusText = {
-                        'AVAILABLE': 'Disponible',
-                        'CHARGING': 'Cargando',
-                        'STOPPED': 'Fuera de Servicio',
-                        'BROKEN': 'Averiado',
-                        'DISCONNECTED': 'Desconectado'
-                    }[cp.status] || cp.status;
+    if (cps.length === 0) {
+        cpsGrid.innerHTML = '<div class="no-data">🔭 No hay CPs registrados</div>';
+    } else {
+        cpsGrid.innerHTML = cps.map(cp => {
+            const statusClass = (cp.status || 'DISCONNECTED').toLowerCase();
+            const statusText = {
+                'AVAILABLE': 'Disponible',
+                'CHARGING': 'Cargando',
+                'STOPPED': 'Fuera de Servicio',
+                'BROKEN': 'Averiado',
+                'DISCONNECTED': 'Desconectado'
+            }[cp.status] || cp.status;
 
-                    const statusIcon = {
-                        'AVAILABLE': '✅',
-                        'CHARGING': '⚡',
-                        'STOPPED': '⛔',
-                        'BROKEN': '💥',
-                        'DISCONNECTED': '❌'
-                    }[cp.status] || '❓';
+            const statusIcon = {
+                'AVAILABLE': '✅',
+                'CHARGING': '⚡',
+                'STOPPED': '⛔',
+                'BROKEN': '💥',
+                'DISCONNECTED': '❌'
+            }[cp.status] || '❓';
 
-                    let weatherAlert = '';
-                    if (cp.weather_alert && cp.weather_alert.active) {
-                        weatherAlert = `
-                            <div class="weather-alert">
-                                ❄️ ${cp.weather_alert.temperature}°C - Operación suspendida
-                            </div>
-                        `;
-                    }
-
-                    return `
-                        <div class="cp-card ${statusClass}">
-                            <div class="cp-header">
-                                <h3>${cp.cp_id}</h3>
-                                <span class="cp-badge">${statusIcon} ${statusText}</span>
-                            </div>
-                            <div class="cp-info">
-                                📍 ${cp.location || 'Sin ubicación'}<br>
-                                💰 ${cp.price || 0}€/kWh
-                                <strong>${statusText}</strong>
-                            </div>
-                            ${weatherAlert}
-                        </div>
-                    `;
-                }).join('');
-                
-                console.log('CPs renderizados correctamente');
-            }
-
-            // Sesiones Activas
-            const sessionsDiv = document.getElementById('active-sessions');
-            const sessions = data.active_sessions || [];
-            
-            console.log(`Renderizando ${sessions.length} sesiones activas`); // DEBUG
-
-            if (sessions.length === 0) {
-                sessionsDiv.innerHTML = '<div class="no-data">📭 No hay sesiones activas</div>';
-            } else {
-                sessionsDiv.innerHTML = `
-                    <table class="sessions-table">
-                        <thead>
-                            <tr>
-                                <th>Sesión</th>
-                                <th>CP</th>
-                                <th>Driver</th>
-                                <th>Inicio</th>
-                                <th>Consumo</th>
-                                <th>Coste</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${sessions.map(s => `
-                                <tr>
-                                    <td><span class="badge badge-info">${s.session_id}</span></td>
-                                    <td><strong>${s.cp_id}</strong></td>
-                                    <td>${s.driver_id}</td>
-                                    <td>${new Date(s.start_time * 1000).toLocaleString('es-ES')}</td>
-                                    <td><strong>${(s.kw_consumed || 0).toFixed(2)} kWh</strong></td>
-                                    <td><strong>${(s.total_cost || 0).toFixed(2)}€</strong></td>
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                    </table>
+            let weatherAlert = '';
+            if (cp.weather_alert && cp.weather_alert.active) {
+                weatherAlert = `
+                    <div class="weather-alert">
+                        ❄️ ${cp.weather_alert.temperature}°C - Operación suspendida
+                    </div>
                 `;
             }
+
+            // CRÍTICO: Mostrar estado de autenticación
+            let authBadge = '';
+            if (cp.authenticated) {
+                authBadge = '<span class="badge badge-success" style="margin-left: 5px;">🔒 Auth</span>';
+            }
+
+            return `
+                <div class="cp-card ${statusClass}">
+                    <div class="cp-header">
+                        <h3>${cp.cp_id} ${authBadge}</h3>
+                        <span class="cp-badge">${statusIcon} ${statusText}</span>
+                    </div>
+                    <div class="cp-info">
+                        📍 ${cp.location || 'Sin ubicación'}<br>
+                        💰 ${cp.price || 0}€/kWh
+                        <strong>${statusText}</strong>
+                    </div>
+                    ${weatherAlert}
+                </div>
+            `;
+        }).join('');
+    }
+
+    // SESIONES ACTIVAS - CORREGIDO para mostrar progreso
+    const sessionsDiv = document.getElementById('active-sessions');
+    const sessions = data.active_sessions || [];
+
+    if (sessions.length === 0) {
+        sessionsDiv.innerHTML = '<div class="no-data">🔭 No hay sesiones activas</div>';
+    } else {
+        sessionsDiv.innerHTML = `
+            <table class="sessions-table">
+                <thead>
+                    <tr>
+                        <th>Sesión</th>
+                        <th>CP</th>
+                        <th>Driver</th>
+                        <th>Inicio</th>
+                        <th>Consumo</th>
+                        <th>Coste</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sessions.map(s => {
+                        const startTime = s.start_time_formatted || 
+                                        new Date(s.start_time * 1000).toLocaleString('es-ES');
+                        const kw = parseFloat(s.kw_consumed || 0).toFixed(2);
+                        const cost = parseFloat(s.total_cost || 0).toFixed(2);
+                        
+                        return `
+                            <tr>
+                                <td><span class="badge badge-info">${s.session_id}</span></td>
+                                <td><strong>${s.cp_id}</strong></td>
+                                <td>${s.driver_id}</td>
+                                <td>${startTime}</td>
+                                <td><strong>⚡ ${kw} kWh</strong></td>
+                                <td><strong>💶 ${cost}€</strong></td>
+                                <td><span class="badge badge-warning">🔄 En progreso</span></td>
+                            </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    // HISTORIAL - NUEVO ENDPOINT IMPLEMENTADO
+    fetchSessionHistory();
+}
+
+// NUEVA FUNCIÓN: Cargar historial de sesiones
+async function fetchSessionHistory() {
+    try {
+        const response = await fetch(`${apiUrl}/api/v1/sessions/history?limit=20`, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            mode: 'cors'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
         }
 
-        // Auto-refresh cada 5 segundos
-        setInterval(fetchData, 5001);
+        const sessions = await response.json();
+        
+        const historyDiv = document.getElementById('session-history');
+        
+        if (!sessions || sessions.length === 0) {
+            historyDiv.innerHTML = '<div class="no-data">📭 No hay historial de sesiones</div>';
+            return;
+        }
 
-        // Carga inicial
-        fetchData();
+        historyDiv.innerHTML = `
+            <table class="sessions-table">
+                <thead>
+                    <tr>
+                        <th>Sesión</th>
+                        <th>CP</th>
+                        <th>Driver</th>
+                        <th>Inicio</th>
+                        <th>Fin</th>
+                        <th>Consumo</th>
+                        <th>Coste</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sessions.map(s => {
+                        const exitosa = s.exitosa === 1 || s.exitosa === true;
+                        const startTime = s.start_time_formatted || 
+                                        new Date(s.start_time * 1000).toLocaleString('es-ES');
+                        const endTime = s.end_time_formatted || 
+                                      new Date(s.end_time * 1000).toLocaleString('es-ES');
+                        const kw = parseFloat(s.kw_consumed || 0).toFixed(2);
+                        const cost = parseFloat(s.total_cost || 0).toFixed(2);
+                        
+                        const statusBadge = exitosa 
+                            ? '<span class="badge badge-success">✅ Completada</span>'
+                            : `<span class="badge badge-danger">⚠️ ${s.razon || 'Interrumpida'}</span>`;
+                        
+                        return `
+                            <tr>
+                                <td><span class="badge badge-info">${s.session_id}</span></td>
+                                <td><strong>${s.cp_id}</strong></td>
+                                <td>${s.driver_id}</td>
+                                <td>${startTime}</td>
+                                <td>${endTime}</td>
+                                <td><strong>⚡ ${kw} kWh</strong></td>
+                                <td><strong>💶 ${cost}€</strong></td>
+                                <td>${statusBadge}</td>
+                            </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (error) {
+        console.error('Error cargando historial:', error);
+        document.getElementById('session-history').innerHTML = 
+            '<div class="no-data">❌ Error cargando historial</div>';
+    }
+}
     </script>
 </body>
 </html>

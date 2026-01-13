@@ -127,38 +127,72 @@ class CentralAPI:
             return None
     
     def get_active_sessions(self) -> List[Dict]:
-        """Obtener sesiones de carga activas"""
+        """Obtener sesiones de carga activas - CORREGIDO con datos en tiempo real"""
         try:
             conn = self.get_db_connection()
+            conn.execute('PRAGMA journal_mode=WAL')
             cursor = conn.cursor()
+            
             cursor.execute('''SELECT session_id, cp_id, driver_id, start_time, 
-                             kw_consumed, total_cost 
-                             FROM sessions 
-                             WHERE end_time IS NULL 
-                             ORDER BY start_time DESC''')
-            sessions = [dict(row) for row in cursor.fetchall()]
+                            kw_consumed, total_cost 
+                            FROM sessions 
+                            WHERE end_time IS NULL 
+                            ORDER BY start_time DESC''')
+            
+            sessions = []
+            for row in cursor.fetchall():
+                session = dict(row)
+                # Formatear timestamp
+                if session.get('start_time'):
+                    session['start_time_formatted'] = datetime.fromtimestamp(
+                        session['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+                # Asegurar valores numéricos
+                session['kw_consumed'] = float(session.get('kw_consumed', 0))
+                session['total_cost'] = float(session.get('total_cost', 0))
+                sessions.append(session)
+            
             conn.close()
             return sessions
         except Exception as e:
-            logger.error(f"❌ Error obteniendo sesiones: {e}")
+            logger.error(f"❌ Error obteniendo sesiones activas: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_session_history(self, limit: int = 50) -> List[Dict]:
-        """Obtener historial de sesiones"""
+        """Obtener historial de sesiones - CORREGIDO"""
         try:
             conn = self.get_db_connection()
+            conn.execute('PRAGMA journal_mode=WAL')
             cursor = conn.cursor()
-            cursor.execute('''SELECT session_id, cp_id, driver_id, start_time, 
-                             end_time, kw_consumed, total_cost, exitosa, razon
-                             FROM sessions 
-                             WHERE end_time IS NOT NULL 
-                             ORDER BY end_time DESC 
-                             LIMIT ?''', (limit,))
-            sessions = [dict(row) for row in cursor.fetchall()]
+            
+            # CRÍTICO: Ordenar por start_time si end_time es NULL
+            cursor.execute('''SELECT session_id, cp_id, driver_id, 
+                            start_time, end_time, kw_consumed, total_cost, 
+                            exitosa, razon
+                            FROM sessions 
+                            WHERE end_time IS NOT NULL 
+                            ORDER BY COALESCE(end_time, start_time) DESC 
+                            LIMIT ?''', (limit,))
+            
+            sessions = []
+            for row in cursor.fetchall():
+                session = dict(row)
+                # Convertir timestamps a formato legible
+                if session.get('start_time'):
+                    session['start_time_formatted'] = datetime.fromtimestamp(
+                        session['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+                if session.get('end_time'):
+                    session['end_time_formatted'] = datetime.fromtimestamp(
+                        session['end_time']).strftime('%Y-%m-%d %H:%M:%S')
+                sessions.append(session)
+            
             conn.close()
             return sessions
         except Exception as e:
             logger.error(f"❌ Error obteniendo historial: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_stats(self) -> Dict:

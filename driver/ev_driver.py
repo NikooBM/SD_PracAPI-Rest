@@ -177,7 +177,7 @@ class Driver:
             self.last_realtime_update = time.time()
 
     def _realtime_display_loop(self):
-        """Loop para mostrar datos en tiempo real sin bloquear input"""
+        """Loop para mostrar datos en tiempo real - CORREGIDO para actualizar cada 2s"""
         last_display = 0
         last_line_length = 0
         
@@ -187,27 +187,32 @@ class Driver:
                 
                 with self.realtime_lock:
                     if self.realtime_data and self.current_service:
-                        # Mostrar cada 2 segundos
+                        # CRÍTICO: Mostrar cada 2 segundos (sincronizado con charging_data)
                         if current - last_display >= 2:
                             # Limpiar línea anterior
                             if last_line_length > 0:
                                 print('\r' + ' ' * last_line_length + '\r', end='', flush=True)
                             
-                            # Mostrar nueva línea
-                            line = f"⚡ Cargando: {self.realtime_data['kw']:.2f} kWh | " \
-                                   f"{self.realtime_data['cost']:.2f} € | " \
-                                   f"CP: {self.realtime_data['cp_id']}"
+                            # Calcular tiempo transcurrido
+                            elapsed = int(current - self.realtime_data.get('timestamp', current))
+                            
+                            # Mostrar nueva línea con más detalle
+                            line = (f"⚡ Cargando: {self.realtime_data['kw']:.2f} kWh | "
+                                f"{self.realtime_data['cost']:.2f} € | "
+                                f"CP: {self.realtime_data['cp_id']} | "
+                                f"Tiempo: {elapsed}s")
+                            
                             print(line, end='\r', flush=True)
                             last_line_length = len(line)
                             last_display = current
                         
-                        # Si no hay actualización en 10s, limpiar
+                        # CRÍTICO: Si no hay actualización en 10s, limpiar
                         if current - self.last_realtime_update > 10:
                             if last_line_length > 0:
                                 print('\r' + ' ' * last_line_length + '\r', end='', flush=True)
                                 last_line_length = 0
                             self.realtime_data = {}
-                            self.show_clean_prompt.set()  # Señalar que se limpió
+                            self.show_clean_prompt.set()
                 
                 time.sleep(0.5)
             except Exception as e:
@@ -215,7 +220,7 @@ class Driver:
                     pass
 
     def _process_notification(self, data: Dict[str, Any]):
-        """Procesar notificación de Central (evitar duplicados)"""
+        """Procesar notificación de Central - CORREGIDO para mostrar ticket siempre"""
         # Generar ID único para el mensaje
         msg_id = f"{data.get('status')}_{data.get('cp_id')}_{data.get('session_id', '')}_{int(data.get('timestamp', 0))}"
         
@@ -259,18 +264,20 @@ class Driver:
                 self.show_clean_prompt.set()
                 self._schedule_next_service()
             
-            elif 'kw_total' in data:
-                # Ticket final
-                print("\n")
+            # CRÍTICO: Procesar ticket final
+            elif data.get('type') == 'FINAL_TICKET' or 'kw_total' in data:
+                # Limpiar línea de progreso si existe
+                print("\n" + " "*80 + "\r", end='', flush=True)
                 
-                # Guardar en historial
+                # Guardar en historial local
                 ticket_data = {
                     'timestamp': timestamp,
                     'cp_id': data.get('cp_id'),
                     'session_id': data.get('session_id'),
-                    'kw_total': data.get('kw_total', 0),
-                    'cost_total': data.get('cost_total', 0),
-                    'exitosa': data.get('exitosa', True)
+                    'kw_total': float(data.get('kw_total', 0)),
+                    'cost_total': float(data.get('cost_total', 0)),
+                    'exitosa': data.get('exitosa', True),
+                    'razon': data.get('razon', '')
                 }
                 
                 try:
@@ -280,8 +287,10 @@ class Driver:
                 except:
                     pass
                 
+                # CRÍTICO: Imprimir ticket SIEMPRE
                 self._print_ticket(data, timestamp)
                 
+                # Limpiar estado
                 self.current_service = None
                 
                 with self.realtime_lock:
@@ -290,7 +299,7 @@ class Driver:
                 self._save_state()
                 self.show_clean_prompt.set()
                 self._schedule_next_service()
-
+            
     def _print_ticket(self, data: Dict[str, Any], timestamp: str):
         """Imprimir ticket de recarga"""
         cp_id = data.get('cp_id', 'N/A')
@@ -462,6 +471,7 @@ class Driver:
         print("="*60)
 
     def _interactive_mode(self):
+        """Modo interactivo - CORREGIDO: manejo robusto de Ctrl+C"""
         self._show_help()
         
         while self.running:
@@ -504,29 +514,61 @@ class Driver:
                     os.system('clear' if os.name != 'nt' else 'cls')
                 
                 elif command in ('quit', 'exit', 'q'):
-                    print("\n🛑 Saliendo...")
-                    break
+                    # CRÍTICO: Manejo correcto de salida durante carga
+                    with self.realtime_lock:
+                        if self.current_service and self.current_service.get('status') == 'authorized':
+                            print("\n⚠️ HAY UN SERVICIO ACTIVO")
+                            resp = input("¿Cancelar servicio y salir? (s/n): ").lower()
+                            
+                            if resp == 's':
+                                print("\n🛑 Cancelando servicio y saliendo...")
+                                self.current_service = None
+                                
+                                with self.realtime_lock:
+                                    self.realtime_data = {}
+                                
+                                self._save_state()
+                                break
+                            else:
+                                print("Cancelado. Servicio continúa.")
+                                continue
+                        else:
+                            print("\n🛑 Saliendo...")
+                            break
                 
                 else:
                     print(f"❌ Comando desconocido: '{command}'")
                     print("💡 Usa 'help' para ver comandos disponibles")
             
             except (KeyboardInterrupt, EOFError):
-                print("\n\n🛑 Interrumpido - Saliendo...")
+                print("\n\n🛑 Interrumpido por usuario")
+                print("Guardando estado...")
+                
+                # CRÍTICO: Guardar estado al interrumpir
+                self._save_state()
                 break
+            
             except Exception as e:
                 if self.running:
                     print(f"❌ Error: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         self.shutdown()
 
     def shutdown(self):
-        """Apagar Driver"""
+        """Apagar Driver - CORREGIDO: guardar estado completo"""
         self.logger.info("🛑 Apagando Driver...")
         self.running = False
         
-        self._save_state()
+        # CRÍTICO: Guardar estado antes de cerrar
+        try:
+            self._save_state()
+            self.logger.info("💾 Estado guardado correctamente")
+        except Exception as e:
+            self.logger.error(f"❌ Error guardando estado: {e}")
         
+        # Cerrar consumers/producers
         if self.consumer:
             try:
                 self.consumer.close()
