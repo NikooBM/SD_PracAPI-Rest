@@ -29,6 +29,9 @@ ENVEOF
 echo "🛠️  Construyendo..."
 docker-compose build
 
+# probar
+docker build -t principal-kafka-init .
+
 echo "🚀 Lanzando infraestructura..."
 docker-compose up -d
 

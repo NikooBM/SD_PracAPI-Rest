@@ -60,7 +60,8 @@ services:
 
   kafka-init:
     build: .
-    container_name: kafka-init
+    # probar
+    container_name: principal-kafka-init
     networks: [evcharging]
     depends_on:
       kafka:
@@ -92,12 +93,14 @@ services:
       - ./central:/app/central:rw
       - ./security:/app/security:ro
       - db_data:/app/data
+      # - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # xhost +local:docker y chmod +x *
     environment:
       SOCKET_PORT: 5001
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       DB_PATH: /app/data/evcharging.db
       DISPLAY: host.docker.internal:0
-      # Para Linux usar: DISPLAY: ${DISPLAY}
+      # ${DISPLAY}
     command: python central/ev_central.py
     restart: unless-stopped
 

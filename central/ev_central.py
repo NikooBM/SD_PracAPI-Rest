@@ -33,7 +33,7 @@ logger = logging.getLogger('Central')
 
 
 class Database:
-    """Base de datos con manejo robusto de concurrencia"""
+    """Base de datos con manejo de concurrencia"""
     def __init__(self, db_path='evcharging.db'):
         self.db_path = db_path
         self.lock = threading.RLock()  # Usar RLock para permitir re-entrada
@@ -157,7 +157,7 @@ class Database:
 
 
 class CPWidget(tk.Frame):
-    """Widget de CP con actualización thread-safe"""
+    """Widget de CP thread-safe"""
     COLORS = {'AVAILABLE': '#2ecc71', 'CHARGING': '#27ae60', 'STOPPED': '#f39c12',
               'BROKEN': '#e74c3c', 'DISCONNECTED': '#95a5a6'}
     
