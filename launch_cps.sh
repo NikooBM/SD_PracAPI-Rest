@@ -58,7 +58,7 @@ for i in $(seq 1 $NUM_CPS); do
     sleep 3
     
     # Lanzar Monitor
-    docker run -d \
+    docker run -d -it \
         --name ${CP_ID}-monitor \
         --network host \
         -e CP_ID=$CP_ID \

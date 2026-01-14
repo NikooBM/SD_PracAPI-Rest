@@ -37,12 +37,53 @@ class WeatherControlOffice:
         self.openweather_base_url = "https://api.openweathermap.org/data/2.5/weather"
     
     def add_location(self, cp_id: str, city: str):
-        """Añadir una localización para monitorizar"""
+        """Añadir una localización para monitorizar - MEJORADO"""
         self.locations[cp_id] = city
         self.alerts[cp_id] = False
         self.last_temperatures[cp_id] = None
         logger.info(f"📍 Añadida localización: {cp_id} → {city}")
-    
+
+        # CRÍTICO: Notificar INMEDIATAMENTE a Central
+        try:
+            endpoint = f"{self.central_api_url}/api/v1/weather/alert"
+            payload = {
+                'cp_id': cp_id,
+                'alert_type': 'REGISTER',
+                'temperature': 999.0,  # Dummy
+                'city': city
+            }
+            response = requests.post(endpoint, json=payload, timeout=5)
+            response.raise_for_status()
+            logger.info(f"✅ Localización notificada a Central: {cp_id} → {city}")
+        except Exception as e:
+            logger.error(f"❌ Error notificando localización: {e}")
+        
+        # NUEVO: Realizar check inmediato para actualizar temperatura
+        threading.Timer(2.0, lambda: self._check_single_location(cp_id)).start()
+
+    def _check_single_location(self, cp_id: str):
+        """Verificar clima de una sola localización (usado después de añadir)"""
+        if cp_id not in self.locations:
+            return
+        
+        city = self.locations[cp_id]
+        weather = self.get_weather(city)
+        
+        if weather is None:
+            logger.warning(f"⚠️ No se pudo obtener clima de {city} ({cp_id})")
+            return
+        
+        temperature = weather['temp']
+        self.last_temperatures[cp_id] = temperature
+        
+        logger.info(f"📊 Primera lectura: {city} ({cp_id}) - {temperature}°C")
+        
+        # Verificar si ya está en alerta
+        if temperature < 0.0:
+            logger.warning(f"🥶 ALERTA INMEDIATA: {city} ({cp_id}) - {temperature}°C")
+            self.notify_central(cp_id, 'START', temperature, city)
+            self.alerts[cp_id] = True
+        
     def remove_location(self, cp_id: str):
         """Eliminar una localización"""
         if cp_id in self.locations:

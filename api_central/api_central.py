@@ -37,6 +37,7 @@ class CentralAPI:
         self._init_kafka()
         
         self._start_db_sync()
+        self.weather_locations: Dict[str, str] = {}  # {cp_id: city_name}
 
     
     def _start_db_sync(self):
@@ -79,10 +80,9 @@ class CentralAPI:
     # MÉTODOS DE CONSULTA
     
     def get_all_cps(self) -> List[Dict]:
-        """Obtener todos los Charging Points"""
+        """Obtener todos los CPs - MEJORADO con info weather"""
         try:
             conn = self.get_db_connection()
-            # Usar WAL mode para mejor concurrencia
             conn.execute('PRAGMA journal_mode=WAL')
             cursor = conn.cursor()
             cursor.execute('''SELECT cp_id, location, price, status, last_seen,
@@ -91,13 +91,21 @@ class CentralAPI:
             cps = [dict(row) for row in cursor.fetchall()]
             conn.close()
             
-            # Alertas climáticas
+            # Agregar alertas climáticas Y localizaciones
             for cp in cps:
                 cp_id = cp['cp_id']
+                
+                # Alerta activa
                 if cp_id in self.weather_alerts:
                     cp['weather_alert'] = self.weather_alerts[cp_id]
                 else:
                     cp['weather_alert'] = None
+                
+                # NUEVO: Localización monitoreada
+                if cp_id in self.weather_locations:
+                    cp['weather_location'] = self.weather_locations[cp_id]
+                else:
+                    cp['weather_location'] = None
             
             return cps
         except Exception as e:
@@ -259,10 +267,17 @@ class CentralAPI:
     def process_weather_alert(self, cp_id: str, alert_type: str, 
                              temperature: float, city: str) -> bool:
         """
-        Procesar alerta climática de EV_W
-        alert_type: 'START' | 'END'
+        Procesar alerta climática - MEJORADO con registro de localizaciones
         """
         try:
+            # NUEVO: Registrar localización
+            if city and cp_id:
+                self.weather_locations[cp_id] = city
+                logger.info(f"📍 Localización weather registrada: {cp_id} → {city}")
+            
+            if alert_type == 'REGISTER':
+                    return True
+                
             if alert_type == 'START':
                 # Iniciar alerta
                 self.weather_alerts[cp_id] = {
@@ -279,7 +294,7 @@ class CentralAPI:
                     self.producer.send('central_commands', {
                         'cp_id': cp_id,
                         'command': 'STOP',
-                        'reason': f'Temperatura baja: {temperature}°C',
+                        'reason': f'Temperatura baja: {temperature}°C en {city}',
                         'timestamp': datetime.now().timestamp()
                     })
                     self.producer.flush()
@@ -298,19 +313,31 @@ class CentralAPI:
                         self.producer.send('central_commands', {
                             'cp_id': cp_id,
                             'command': 'RESUME',
-                            'reason': f'Temperatura normalizada: {temperature}°C',
+                            'reason': f'Temperatura normalizada: {temperature}°C en {city}',
                             'timestamp': datetime.now().timestamp()
                         })
                         self.producer.flush()
                         logger.info(f"📤 Comando RESUME enviado a {cp_id}")
                     
-                    # Eliminar de alertas activas después de un tiempo
+                    # Eliminar de alertas activas después
                     del self.weather_alerts[cp_id]
             
             return True
         except Exception as e:
             logger.error(f"❌ Error procesando alerta: {e}")
             return False
+
+    def get_weather_info(self) -> Dict:
+        """
+        NUEVO: Obtener información completa de weather
+        """
+        return {
+            'alerts': self.get_weather_alerts(),
+            'monitored_locations': dict(self.weather_locations),
+            'total_monitored': len(self.weather_locations),
+            'active_alerts': len(self.weather_alerts)
+        }
+
 
 # Instancia global de la API
 api = CentralAPI(
@@ -398,6 +425,19 @@ def weather_alert():
     
     except Exception as e:
         logger.error(f"❌ Error en endpoint alert: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/weather/info', methods=['GET'])
+def get_weather_info():
+    """
+    GET /api/v1/weather/info
+    Obtener información completa del sistema weather
+    """
+    try:
+        info = api.get_weather_info()
+        return jsonify(info), 200
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/v1/system/status', methods=['GET'])

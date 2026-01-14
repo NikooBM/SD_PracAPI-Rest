@@ -1,4 +1,6 @@
 #!/bin/bash
+# demo_local_visual.sh - CORREGIDO
+
 echo "=============================================="
 echo "EVCharging - Demo LOCAL (1 PC)"
 echo "=============================================="
@@ -15,8 +17,11 @@ docker-compose down -v 2>/dev/null
 docker rm -f $(docker ps -a -q --filter "name=CP") 2>/dev/null
 docker rm -f $(docker ps -a -q --filter "name=driver-") 2>/dev/null
 
-# Configurar para localhost
-sed -i 's/TU_IP_PC1/localhost/g' docker-compose.yml
+# CORRECCIÓN: Configurar para localhost con sed correcto
+echo "📝 Configurando para localhost..."
+cp docker-compose.yml docker-compose.yml.bak
+sed -i.tmp 's/TU_IP_PC1/localhost/g' docker-compose.yml
+rm -f docker-compose.yml.tmp docker-compose.yml.bak
 
 # API Key
 read -p "OpenWeather API Key: " OPENWEATHER_KEY
@@ -28,9 +33,7 @@ ENVEOF
 # Build y lanzar infraestructura
 echo "🛠️  Construyendo..."
 docker-compose build
-
-# probar
-docker build -t principal-kafka-init .
+# docker build -t principal-kafka-init .
 
 echo "🚀 Lanzando infraestructura..."
 docker-compose up -d
@@ -59,7 +62,7 @@ for i in $(seq 1 $NUM_CPS); do
     
     sleep 2
     
-    docker run -d \
+    docker run -d -it \
         --name ${CP_ID}-monitor \
         --network evcharging_net \
         -e CP_ID=$CP_ID \
@@ -83,7 +86,6 @@ done
 echo "🚗 Lanzando $NUM_DRIVERS Drivers..."
 for i in $(seq 1 $NUM_DRIVERS); do
     DRIVER_ID=$(printf "Driver_%03d" $i)
-    # Docker exige en minúsculas y sin guiones bajos
     CONTAINER_NAME=$(echo $DRIVER_ID | tr '_' '-' | tr '[:upper:]' '[:lower:]')
     
     docker run -d -it \
@@ -108,4 +110,13 @@ echo "Servicios:"
 echo "  - Front:      http://localhost"
 echo "  - API:        http://localhost:8080"
 echo "  - Registry:   https://localhost:8443"
+echo "=============================================="
+echo ""
+echo "💡 COMANDOS ÚTILES:"
+echo "  - Ver CPs:        docker ps --filter 'name=CP'"
+echo "  - Ver Drivers:    docker ps --filter 'name=driver'"
+echo "  - Logs Central:   docker-compose logs -f central"
+echo "  - Conectar CP:    docker attach CP001-engine"
+echo "  - Conectar Driver: docker attach driver-001"
+echo "  - Salir sin matar: CTRL+P seguido de CTRL+Q"
 echo "=============================================="

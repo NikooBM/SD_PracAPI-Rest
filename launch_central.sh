@@ -1,4 +1,6 @@
 #!/bin/bash
+# launch_central.sh - CORREGIDO
+
 echo "=============================================="
 echo "EVCharging - Lanzamiento PC1 (CENTRAL)"
 echo "=============================================="
@@ -11,9 +13,19 @@ if [ -z "$IP_PC1" ]; then
     exit 1
 fi
 
-# Actualizar docker-compose.yml con la IP
+# Usar backup file y sed con -i.bak para compatibilidad
 echo "📝 Configurando Kafka con IP: $IP_PC1"
-sed -i "s/TU_IP_PC1/$IP_PC1/g" docker-compose.yml
+
+# Crear backup
+cp docker-compose.yml docker-compose.yml.bak
+
+# CORRECCIÓN: sed con sintaxis correcta
+sed -i.tmp "s/TU_IP_PC1/${IP_PC1}/g" docker-compose.yml
+
+# Limpiar archivos temporales
+rm -f docker-compose.yml.tmp docker-compose.yml.bak
+
+echo "✅ docker-compose.yml actualizado"
 
 # Solicitar API Key de OpenWeather
 read -p "Introduce tu OpenWeather API Key: " OPENWEATHER_KEY
