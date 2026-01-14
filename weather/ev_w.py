@@ -37,7 +37,7 @@ class WeatherControlOffice:
         self.openweather_base_url = "https://api.openweathermap.org/data/2.5/weather"
     
     def add_location(self, cp_id: str, city: str):
-        """Añadir una localización para monitorizar - MEJORADO"""
+        """Añadir una localización para monitorizar"""
         self.locations[cp_id] = city
         self.alerts[cp_id] = False
         self.last_temperatures[cp_id] = None

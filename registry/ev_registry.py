@@ -1,5 +1,5 @@
 """
-EV_REGISTRY - Sistema de Registro Seguro CORREGIDO
+EV_REGISTRY - Sistema de Registro Seguro
 Implementa API REST con HTTPS real, autenticación JWT y gestión de credenciales
 Release 2 - Práctica SD 25/26
 """

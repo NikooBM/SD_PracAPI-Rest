@@ -80,7 +80,7 @@ class CentralAPI:
     # MÉTODOS DE CONSULTA
     
     def get_all_cps(self) -> List[Dict]:
-        """Obtener todos los CPs - MEJORADO con info weather"""
+        """Obtener todos los CPs - con info weather"""
         try:
             conn = self.get_db_connection()
             conn.execute('PRAGMA journal_mode=WAL')
@@ -135,7 +135,7 @@ class CentralAPI:
             return None
     
     def get_active_sessions(self) -> List[Dict]:
-        """Obtener sesiones de carga activas - CORREGIDO con datos en tiempo real"""
+        """Obtener sesiones de carga activas con datos en tiempo real"""
         try:
             conn = self.get_db_connection()
             conn.execute('PRAGMA journal_mode=WAL')
@@ -168,7 +168,7 @@ class CentralAPI:
             return []
     
     def get_session_history(self, limit: int = 50) -> List[Dict]:
-        """Obtener historial de sesiones - CORREGIDO"""
+        """Obtener historial de sesiones"""
         try:
             conn = self.get_db_connection()
             conn.execute('PRAGMA journal_mode=WAL')
@@ -267,12 +267,20 @@ class CentralAPI:
     def process_weather_alert(self, cp_id: str, alert_type: str, 
                              temperature: float, city: str) -> bool:
         """
-        Procesar alerta climática - MEJORADO con registro de localizaciones
+        Procesar alerta climática - con registro de localizaciones
         """
+        
         try:
             # NUEVO: Registrar localización
             if city and cp_id:
                 self.weather_locations[cp_id] = city
+                if self.producer:
+                    self.producer.send('weather_sync', {
+                        'cp_id': cp_id,
+                        'alert_type': alert_type,
+                        'temperature': temperature,
+                        'city': city
+                    })
                 logger.info(f"📍 Localización weather registrada: {cp_id} → {city}")
             
             if alert_type == 'REGISTER':

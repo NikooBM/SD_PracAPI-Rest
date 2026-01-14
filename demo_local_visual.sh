@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo_local_visual.sh - CORREGIDO
+# demo_local_visual.sh
 
 echo "=============================================="
 echo "EVCharging - Demo LOCAL (1 PC)"

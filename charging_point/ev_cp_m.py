@@ -50,7 +50,7 @@ class CPMonitor:
 
     def start(self, interactive: bool = False) -> bool:
         """
-        Iniciar Monitor - CORREGIDO: verificar encryption key persistente
+        Iniciar Monitor
         
         Args:
             interactive: Si True, permite comandos interactivos para re-autenticación
@@ -461,7 +461,7 @@ class CPMonitor:
             return False
 
     def _health_check_loop(self):
-        """Loop principal de health checks - CORREGIDO: NO re-autenticación automática"""
+        """Loop principal de health checks"""
         self.logger.info("🩺 Health checks iniciados")
         
         consecutive_connection_failures = 0
@@ -604,7 +604,7 @@ class CPMonitor:
             print("\nSaliendo...")
 
     def shutdown(self):
-        """Apagar Monitor - CORREGIDO: NO eliminar encryption key automáticamente"""
+        """Apagar Monitor"""
         self.logger.info("🛑 Apagando Monitor...")
         self.running = False
         

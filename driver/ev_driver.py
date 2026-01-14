@@ -67,7 +67,7 @@ class Driver:
         return True
 
     def _load_state(self):
-        """Cargar estado guardado - MEJORADO con recuperación de sesión activa"""
+        """Cargar estado guardado - con recuperación de sesión activa"""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'rb') as f:
@@ -180,7 +180,7 @@ class Driver:
                     time.sleep(1)
 
     def _process_realtime_data(self, data: Dict[str, Any]):
-        """Procesar datos de carga en tiempo real - CORREGIDO"""
+        """Procesar datos de carga en tiempo real"""
         if self.current_service is None:
             return
         
@@ -203,7 +203,7 @@ class Driver:
 
     def _realtime_display_loop(self):
         """
-        Loop para mostrar progreso en tiempo real - CORREGIDO
+        Loop para mostrar progreso en tiempo real
         Muestra SIEMPRE que hay datos de carga
         """
         last_display = 0
@@ -249,7 +249,7 @@ class Driver:
                     pass
 
     def _process_notification(self, data: Dict[str, Any]):
-        """Procesar notificación - MEJORADO con reconexión"""
+        """Procesar notificación - con reconexión"""
         # Generar ID único
         msg_id = f"{data.get('status')}_{data.get('cp_id')}_{data.get('session_id', '')}_{int(data.get('timestamp', 0))}"
         
@@ -343,7 +343,7 @@ class Driver:
                 self.show_clean_prompt.set()
                 self._schedule_next_service()
             
-            # TICKET FINAL - MEJORADO con validación
+            # TICKET FINAL
             elif msg_type == 'FINAL_TICKET' or 'kw_total' in data:
                 # Limpiar línea de progreso
                 print("\n" + " "*100 + "\r", end='', flush=True)
@@ -386,7 +386,7 @@ class Driver:
                 self._schedule_next_service()
             
     def _print_ticket(self, data: Dict[str, Any], timestamp: str):
-        """Imprimir ticket de recarga - MEJORADO"""
+        """Imprimir ticket de recarga"""
         cp_id = data.get('cp_id', 'N/A')
         session_id = data.get('session_id', 'N/A')
         kw_total = data.get('kw_total', 0)

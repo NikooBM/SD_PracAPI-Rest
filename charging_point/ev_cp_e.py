@@ -1,6 +1,6 @@
 """
-EV_CP_E - Engine Corregido
-Correcciones: carga robusta de encryption key, manejo mejorado de sesiones recuperadas, cifrado condicional robusto
+EV_CP_E - Engine
+Carga robusta de encryption key, manejo de sesiones recuperadas, cifrado condicional robusto
 """
 import socket
 import threading
@@ -351,7 +351,7 @@ class ChargingPointEngine:
         return True
 
     def iniciar_carga_manual(self) -> bool:
-        """Carga manual (emergencia) - CORREGIDO para notificar a Central"""
+        """Carga manual (emergencia)"""
         # Verificar conexión reciente con Central
         if time.time() - self.last_central_contact > 30:
             print("\n⚠️ Central no responde hace más de 30s")
@@ -423,7 +423,7 @@ class ChargingPointEngine:
         return True
 
     def _charging_loop(self):
-        """Loop de carga - CORREGIDO para manejar cargas manuales"""
+        """Loop de carga"""
         last_log_time = 0
         last_send_time = 0
         
@@ -692,7 +692,7 @@ class ChargingPointEngine:
         print("="*60)
     
     def _interactive_mode(self):
-        """Modo interactivo - CORREGIDO: manejo robusto de 'q' durante carga"""
+        """Modo interactivo"""
         self._show_help()
         
         try:
@@ -784,7 +784,7 @@ class ChargingPointEngine:
             self.shutdown()
         
     def shutdown(self):
-        """Apagar Engine - CORREGIDO: preservar sesión activa"""
+        """Apagar Engine"""
         self.logger.info("🛑 Apagando Engine...")
         self.running = False
         self.charging_active = False

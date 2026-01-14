@@ -1,5 +1,5 @@
 #!/bin/bash
-# launch_central.sh - CORREGIDO
+# launch_central.sh
 
 echo "=============================================="
 echo "EVCharging - Lanzamiento PC1 (CENTRAL)"

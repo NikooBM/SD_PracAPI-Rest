@@ -203,7 +203,7 @@ class CPWidget(tk.Frame):
     
     def actualizar(self, status: str, driver_id: str = "", kw: float = 0.0, 
                 cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget - CORREGIDO: orden correcto de etiquetas"""
+        """Actualizar widget: orden correcto de etiquetas"""
         try:
             color = self.COLORS.get(status, '#95a5a6')
             self.config(bg=color)
@@ -346,7 +346,7 @@ class Central:
                 self.producer.send('test_topic', {'test': 'connection'}).get(timeout=10)
                 
                 self.consumer = KafkaConsumer(
-                    'service_requests', 'charging_data', 'charging_complete',
+                    'service_requests', 'charging_data', 'charging_complete', 'weather_sync',
                     bootstrap_servers=self.kafka_servers,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                     auto_offset_reset='latest', 
@@ -377,7 +377,11 @@ class Central:
                     
                     try:
                         if msg.topic == 'service_requests':
-                            self._handle_service_request(msg.value)
+                            self._handle_service_request(msg.value)  
+                        elif msg.topic == 'weather_sync':
+                            val = msg.value
+                            self.handle_weather_alert(val['cp_id'], val['alert_type'], 
+                                                    val['temperature'], val['city'])
                         elif msg.topic == 'charging_data':
                             self._handle_charging_data(msg.value)
                         elif msg.topic == 'charging_complete':
@@ -458,7 +462,7 @@ class Central:
             return True  # Modo degradado
     
     def _handle_monitor(self, sock: socket.socket, client_ip: str):
-        """Handler de Monitor con verificación de credenciales - MEJORADO"""
+        """Handler de Monitor con verificación de credenciales """
         cp_id: Optional[str] = None
         
         try:
@@ -573,7 +577,7 @@ class Central:
                 pass
             
     def _monitor_health_loop(self, cp_id: str, sock: socket.socket):
-        """Loop de health checks - CORREGIDO: detección robusta de averías"""
+        """Loop de health checks: detección robusta de averías"""
         sock.settimeout(15)
         last_health_ok = time.time()
         last_failure_log = 0  # Para evitar spam de logs
@@ -727,7 +731,7 @@ class Central:
             self._enqueue_gui_action('log', f"✅ {driver_id} en {cp_id}")
     
     def _handle_charging_data(self, data: Dict[str, Any]):
-        """Handler de datos de carga - CORREGIDO para enviar a Driver"""
+        """Handler de datos de carga"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -776,7 +780,7 @@ class Central:
                                             cp.get('authenticated', False))
                             
     def _handle_charging_complete(self, data: Dict[str, Any]):
-        """Handler de finalización de carga - CORREGIDO para enviar ticket siempre"""
+        """Handler de finalización de carga"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -938,7 +942,7 @@ class Central:
     
     def handle_weather_alert(self, cp_id: str, alert_type: str, temperature: float, city: str):
         """
-        Manejar alerta climática - CORREGIDO con actualización persistente
+        Manejar alerta climática
         """
         with self.lock:
             # CRÍTICO: Actualizar localización SIEMPRE (incluso en alertas START/END)
@@ -977,7 +981,7 @@ class Central:
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
                     
     def _send_command(self, cp_id: str, command: str):
-        """Enviar comando a CP - CORREGIDO para notificar estado"""
+        """Enviar comando a CP"""
         with self.lock:
             if cp_id not in self.charging_points:
                 self.logger.warning(f"⚠️ CP {cp_id} no existe")
@@ -1049,7 +1053,7 @@ class Central:
         self.audit.log_error('SESSION_ABORTED', cp_id, f'Razón: {razon}')
     
     def _handle_cp_failure(self, cp_id: str):
-        """Manejar fallo de CP - CORREGIDO para evitar spam de avisos"""
+        """Manejar fallo de CP"""
         with self.lock:
             if cp_id not in self.charging_points:
                 return
@@ -1180,7 +1184,7 @@ class Central:
 
     def _do_gui_update_weather_location(self, cp_id: str, city: str):
         """
-        Actualizar localización weather en GUI - CORREGIDO
+        Actualizar localización weather en GUI
         Sin atributos dinámicos, usando diccionario
         """
         if cp_id in self.cp_widgets:
@@ -1467,7 +1471,7 @@ class Central:
     
     def _do_gui_update_cp(self, cp_id: str, status: str, driver: str = "", 
                         kw: float = 0.0, cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget CP - MEJORADO con localización weather"""
+        """Actualizar widget CP - con localización weather"""
         if cp_id in self.cp_widgets:
             try:
                 self.cp_widgets[cp_id].actualizar(status, driver, kw, cost, authenticated)
