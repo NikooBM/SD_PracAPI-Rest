@@ -13,15 +13,15 @@ NUM_DRIVERS=${NUM_DRIVERS:-2}
 
 # Limpiar
 echo "🧹 Limpiando sistema..."
-docker-compose down -v 2>/dev/null
+docker compose down -v 2>/dev/null
 docker rm -f $(docker ps -a -q --filter "name=CP") 2>/dev/null
 docker rm -f $(docker ps -a -q --filter "name=driver-") 2>/dev/null
 
 # CORRECCIÓN: Configurar para localhost con sed correcto
 echo "📝 Configurando para localhost..."
-cp docker-compose.yml docker-compose.yml.bak
-sed -i.tmp 's/TU_IP_PC1/localhost/g' docker-compose.yml
-rm -f docker-compose.yml.tmp docker-compose.yml.bak
+cp docker compose.yml docker compose.yml.bak
+sed -i.tmp 's/TU_IP_PC1/localhost/g' docker compose.yml
+rm -f docker compose.yml.tmp docker compose.yml.bak
 
 # API Key
 read -p "OpenWeather API Key: " OPENWEATHER_KEY
@@ -32,11 +32,11 @@ ENVEOF
 
 # Build y lanzar infraestructura
 echo "🛠️  Construyendo..."
-docker-compose build
+docker compose build
 # docker build -t principal-kafka-init .
 
 echo "🚀 Lanzando infraestructura..."
-docker-compose up -d
+docker compose up -d
 
 echo "⏳ Esperando servicios..."
 sleep 20
@@ -115,7 +115,7 @@ echo ""
 echo "💡 COMANDOS ÚTILES:"
 echo "  - Ver CPs:        docker ps --filter 'name=CP'"
 echo "  - Ver Drivers:    docker ps --filter 'name=driver'"
-echo "  - Logs Central:   docker-compose logs -f central"
+echo "  - Logs Central:   docker compose logs -f central"
 echo "  - Conectar CP:    docker attach CP001-engine"
 echo "  - Conectar Driver: docker attach driver-001"
 echo "  - Salir sin matar: CTRL+P seguido de CTRL+Q"

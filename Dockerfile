@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /app/central /app/charging_point /app/driver \
              /app/registry /app/api_central /app/weather /app/security /app/front
 
-# Copiar código (se sobrescribirá con volumes en docker-compose)
+# Copiar código (se sobrescribirá con volumes en docker compose)
 COPY central/ ./central/
 COPY charging_point/ ./charging_point/
 COPY driver/ ./driver/

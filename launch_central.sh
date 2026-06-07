@@ -17,13 +17,13 @@ fi
 echo "📝 Configurando Kafka con IP: $IP_PC1"
 
 # Crear backup
-cp docker-compose.yml docker-compose.yml.bak
+cp docker compose.yml docker-compose.yml.bak
 
 # CORRECCIÓN: sed con sintaxis correcta
 sed -i.tmp "s/TU_IP_PC1/${IP_PC1}/g" docker-compose.yml
 
 # Limpiar archivos temporales
-rm -f docker-compose.yml.tmp docker-compose.yml.bak
+rm -f docker compose.yml.tmp docker-compose.yml.bak
 
 echo "✅ docker-compose.yml actualizado"
 
@@ -46,11 +46,11 @@ echo "✅ Configuración guardada en .env"
 
 # Limpiar contenedores anteriores
 echo "🧹 Limpiando sistema anterior..."
-docker-compose down -v 2>/dev/null
+docker compose down -v 2>/dev/null
 
 # Construir imagen
 echo "🛠️  Construyendo imagen Docker..."
-docker-compose build
+docker compose build
 
 if [ $? -ne 0 ]; then
     echo "❌ Error en build"
@@ -59,7 +59,7 @@ fi
 
 # Lanzar servicios
 echo "🚀 Lanzando servicios en PC1..."
-docker-compose up -d
+docker compose up -d
 
 echo ""
 echo "=============================================="
@@ -83,5 +83,5 @@ echo "=============================================="
 echo ""
 read -p "¿Ver logs de Central? (s/n): " VER_LOGS
 if [ "$VER_LOGS" = "s" ]; then
-    docker-compose logs -f central
+    docker compose logs -f central
 fi

@@ -3,7 +3,7 @@
 
 # INSTRUCCIONES:
 # 1. En PC1 (Central): Cambiar localhost por la IP real del PC1
-# 2. Ejecutar: docker-compose up -d
+# 2. Ejecutar: docker compose up -d
 
 networks:
   evcharging:
@@ -129,13 +129,13 @@ services:
     depends_on:
       - central
       - kafka
-    ports: ["8080:8080"]
+    ports: ["8082:8082"]
     volumes:
       - ./api_central:/app/api_central:rw
       - ./security:/app/security:ro
       - db_data:/app/data
     environment:
-      API_PORT: 8080
+      API_PORT: 8082
       DB_PATH: /app/data/evcharging.db
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     command: python api_central/api_central.py
