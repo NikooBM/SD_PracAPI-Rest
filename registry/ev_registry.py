@@ -12,7 +12,6 @@ CORRECCIONES APLICADAS:
   [5.4] Manejo de SIGTERM para cierre limpio
 """
 import os
-import json
 import sqlite3
 import secrets
 import hashlib
@@ -51,7 +50,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Configuración de seguridad — JWT_SECRET_KEY obligatoria
+# FIX [1.4]: JWT_SECRET_KEY obligatoria — no valor por defecto inseguro
 # ---------------------------------------------------------------------------
 SECRET_KEY = os.getenv('JWT_SECRET_KEY')
 if not SECRET_KEY:
@@ -67,7 +66,7 @@ if len(SECRET_KEY) < 32:
 
 TOKEN_EXPIRATION_HOURS = 24
 
-# Clave de administración para endpoints destructivos
+# FIX [1.6]: Clave de administración para endpoints destructivos
 ADMIN_API_KEY = os.getenv('REGISTRY_ADMIN_KEY')
 if not ADMIN_API_KEY:
     logger.warning(
@@ -75,12 +74,12 @@ if not ADMIN_API_KEY:
         "Los endpoints de revocación y baja estarán deshabilitados."
     )
 
-# ---------------------------------------------------------------------------
-# Helpers de seguridad
-# ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# FIX [1.6]: Decorador de autenticación de admin
+# ---------------------------------------------------------------------------
 def require_admin(f):
-    """Decorador: exige X-Admin-Key en la cabecera."""
+    """Exige X-Admin-Key en la cabecera para endpoints destructivos."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not ADMIN_API_KEY:
@@ -96,9 +95,8 @@ def require_admin(f):
 
 
 # ---------------------------------------------------------------------------
-# Generación de certificado SSL persistente
+# FIX [1.3]: Generación de certificado SSL persistente (no 'adhoc')
 # ---------------------------------------------------------------------------
-
 def generate_self_signed_cert(cert_path: str, key_path: str):
     """Genera un certificado autofirmado persistente (solo si no existe)."""
     if os.path.exists(cert_path) and os.path.exists(key_path):
@@ -129,9 +127,8 @@ def generate_self_signed_cert(cert_path: str, key_path: str):
 
 
 # ---------------------------------------------------------------------------
-# Base de datos con concurrencia y rate limiting
+# FIX [1.7] + [1.8]: Base de datos con concurrencia y rate limiting
 # ---------------------------------------------------------------------------
-
 class RegistryDatabase:
     """Base de datos del Registry con RLock, WAL mode y rate limiting."""
 
@@ -140,17 +137,19 @@ class RegistryDatabase:
 
     def __init__(self, db_path: str = 'registry.db'):
         self.db_path = db_path
+        # FIX [1.7]: RLock para concurrencia segura con Flask threads
         self.lock = threading.RLock()
 
         self.conn = sqlite3.connect(
             db_path, check_same_thread=False, timeout=30.0,
             isolation_level=None
         )
+        # FIX [1.7]: WAL mode para lecturas concurrentes
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA synchronous=NORMAL')
         self.conn.row_factory = sqlite3.Row
 
-        # Rate limiting en memoria: cp_id → [timestamp, ...]
+        # FIX [1.8]: Rate limiting en memoria: cp_id → [timestamps de fallos]
         self._failed_attempts: dict = defaultdict(list)
 
         self._init_schema()
@@ -188,7 +187,7 @@ class RegistryDatabase:
             self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Rate limiting
+    # FIX [1.8]: Rate limiting
     # ------------------------------------------------------------------
 
     def _is_locked_out(self, cp_id: str) -> bool:
@@ -252,7 +251,10 @@ class RegistryDatabase:
 
     def authenticate_cp(self, cp_id: str, password: str,
                         source_ip: str = '?') -> Optional[Dict]:
-        """Autenticar CP. Aplica rate limiting y devuelve token + encryption_key."""
+        """
+        Autenticar CP. Aplica rate limiting y devuelve token + encryption_key.
+        FIX [1.8]: bloqueo por IP/cp_id tras 5 fallos.
+        """
         if self._is_locked_out(cp_id):
             logger.warning(
                 f"🔒 CP {cp_id} bloqueado temporalmente "
@@ -342,6 +344,12 @@ class RegistryDatabase:
             self.conn.commit()
         logger.info(f"🔒 Token de {cp_id} revocado")
 
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Instancia global
@@ -349,6 +357,7 @@ class RegistryDatabase:
 db = RegistryDatabase(
     db_path=os.getenv('DB_PATH', 'registry.db')
 )
+
 
 # ---------------------------------------------------------------------------
 # Endpoints REST
@@ -376,6 +385,7 @@ def register_endpoint():
         return jsonify({'error': str(e)}), 500
 
 
+# FIX [1.6]: require_admin protege la baja de CPs
 @app.route('/api/v1/unregister/<cp_id>', methods=['DELETE'])
 @require_admin
 def unregister_endpoint(cp_id: str):
@@ -437,6 +447,7 @@ def list_cps_endpoint():
         return jsonify({'error': str(e)}), 500
 
 
+# FIX [1.6]: require_admin protege la revocación de tokens
 @app.route('/api/v1/revoke/<cp_id>', methods=['POST'])
 @require_admin
 def revoke_token_endpoint(cp_id: str):
@@ -461,15 +472,16 @@ if __name__ == '__main__':
 
     port = int(os.getenv('REGISTRY_PORT', 8443))
 
-    # Certificado SSL persistente
-    data_dir = os.getenv('REGISTRY_DATA_DIR', '/app/data')
+    # FIX [1.3]: Certificado SSL persistente (no 'adhoc')
+    data_dir = os.getenv('REGISTRY_DATA_DIR', '/app/data/certs')
     cert_path = os.path.join(data_dir, 'registry.crt')
     key_path = os.path.join(data_dir, 'registry.key')
     generate_self_signed_cert(cert_path, key_path)
 
-    # Manejo de SIGTERM para cierre limpio
+    # FIX [5.4]: Manejo de SIGTERM para cierre limpio
     def handle_sigterm(signum, frame):
         logger.info("🛑 SIGTERM recibido, cerrando Registry limpiamente...")
+        db.close()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_sigterm)
@@ -478,11 +490,11 @@ if __name__ == '__main__':
     logger.info(f"🚀 Registry escuchando en https://0.0.0.0:{port}")
     logger.info("📋 Endpoints:")
     logger.info("   POST   /api/v1/register           - Registrar CP")
-    logger.info("   DELETE /api/v1/unregister/:id     - Baja CP (admin)")
+    logger.info("   DELETE /api/v1/unregister/:id     - Baja CP (X-Admin-Key)")
     logger.info("   POST   /api/v1/authenticate       - Autenticar CP")
     logger.info("   POST   /api/v1/verify             - Verificar token")
     logger.info("   GET    /api/v1/cps                - Listar CPs")
-    logger.info("   POST   /api/v1/revoke/:id         - Revocar token (admin)")
+    logger.info("   POST   /api/v1/revoke/:id         - Revocar token (X-Admin-Key)")
     logger.info("=" * 60)
 
     app.run(

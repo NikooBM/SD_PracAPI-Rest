@@ -8,7 +8,6 @@ CORRECCIONES APLICADAS:
   [2.2] api_central ya NO publica en central_commands; solo notifica en weather_sync
   [2.3] Puerto por defecto corregido a 8082; CENTRAL_API_URL apunta a 8082
   [5.4] Manejo de SIGTERM para cierre limpio
-  [5.5] Sin cambios en lógica (Front hace polling; los datos obsoletos los gestiona el Front)
   [5.6] Logs de alta frecuencia a nivel DEBUG
   [5.7] Verificación Kafka sin publicar en test_topic
 """
@@ -44,7 +43,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Autenticación Weather API Key
+# FIX [1.5]: Autenticación Weather API Key
 # ---------------------------------------------------------------------------
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
 if not WEATHER_API_KEY:
@@ -93,14 +92,14 @@ class CentralAPI:
         self._start_db_sync()
 
     # ------------------------------------------------------------------
-    # Kafka
+    # FIX [5.7]: Kafka — verificar sin publicar en test_topic
     # ------------------------------------------------------------------
 
     def _init_kafka(self):
         """Inicializar Kafka Producer verificando conexión sin crear topics basura."""
         for attempt in range(1, 11):
             try:
-                # Verificar disponibilidad sin publicar en topics
+                # FIX [5.7]: Verificar disponibilidad con admin client, sin publicar
                 admin = KafkaAdminClient(
                     bootstrap_servers=self.kafka_servers,
                     request_timeout_ms=5000
@@ -122,7 +121,10 @@ class CentralAPI:
         logger.error("❌ No se pudo conectar a Kafka tras 10 intentos")
 
     def _send_kafka(self, topic: str, payload: dict):
-        """Enviar mensaje a Kafka sin flush síncrono (excepto críticos)."""
+        """
+        Enviar mensaje a Kafka.
+        FIX [4.5]: sin flush síncrono salvo mensajes críticos.
+        """
         try:
             if self.producer:
                 self.producer.send(topic, payload)
@@ -130,7 +132,7 @@ class CentralAPI:
             logger.error(f"❌ Error enviando a Kafka [{topic}]: {e}")
 
     # ------------------------------------------------------------------
-    # BD sync
+    # BD sync — keep-alive WAL
     # ------------------------------------------------------------------
 
     def _start_db_sync(self):
@@ -157,7 +159,7 @@ class CentralAPI:
         return conn
 
     # ------------------------------------------------------------------
-    # Consultas
+    # Consultas (solo lectura de BD compartida)
     # ------------------------------------------------------------------
 
     def get_all_cps(self) -> List[Dict]:
@@ -293,7 +295,8 @@ class CentralAPI:
         return [{'cp_id': k, **v} for k, v in self.weather_alerts.items()]
 
     # ------------------------------------------------------------------
-    # Procesamiento de alertas weather
+    # FIX [2.2]: Procesamiento de alertas weather — SOLO notifica a Central
+    #            vía weather_sync. NO publica en central_commands.
     # ------------------------------------------------------------------
 
     def process_weather_alert(self, cp_id: str, alert_type: str,
@@ -331,8 +334,8 @@ class CentralAPI:
                 }
                 logger.warning(f"❄️ ALERTA INICIADA: {cp_id} ({city}) - {temperature}°C")
 
-                # Solo notificar a ev_central vía weather_sync
-                # ev_central es quien publica en central_commands
+                # FIX [2.2]: Solo notificar a ev_central vía weather_sync.
+                # ev_central es quien publica en central_commands.
                 if self.producer:
                     self._send_kafka('weather_sync', {
                         'cp_id': cp_id,
@@ -431,6 +434,7 @@ def get_weather_alerts():
     return jsonify(api.get_weather_alerts()), 200
 
 
+# FIX [1.5]: Endpoint protegido con X-API-Key
 @app.route('/api/v1/weather/alert', methods=['POST'])
 @require_weather_api_key
 def weather_alert():
@@ -492,7 +496,7 @@ if __name__ == '__main__':
     logger.info("Release 2 - Práctica SD 25/26")
     logger.info("=" * 60)
 
-    # Manejo de SIGTERM
+    # FIX [5.4]: Manejo de SIGTERM
     def handle_sigterm(signum, frame):
         logger.info("🛑 SIGTERM recibido, cerrando API_Central...")
         api.shutdown()
@@ -501,7 +505,8 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, handle_sigterm)
     signal.signal(signal.SIGINT, handle_sigterm)
 
-    port = int(os.getenv('API_PORT', 8082))  # 8082 como valor por defecto correcto
+    # FIX [2.3]: Puerto por defecto 8082
+    port = int(os.getenv('API_PORT', 8082))
     logger.info(f"🚀 API escuchando en http://0.0.0.0:{port}")
     logger.info("=" * 60)
 
