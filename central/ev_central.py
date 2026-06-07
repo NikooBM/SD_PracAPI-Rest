@@ -1,29 +1,34 @@
 """
-EV_CENTRAL - Release 2
-Módulo principal del Central de EVCharging.
+EV_CENTRAL — Central de Control EVCharging
+Release 2 - Práctica SD 25/26
 
-CORRECCIONES APLICADAS:
-  [1.1] Modo degradado eliminado: Registry inalcanzable → CP rechazado
-  [1.2] Contraseñas guardadas en directorio protegido /app/data/cp_credentials, no en /tmp
-  [1.3] verify=False eliminado; se usa certificado del Registry como CA
-  [2.6] Tkinter thread-safe: eliminadas llamadas a root.update() fuera del mainloop
-  [4.1] TCP Keep-Alive en socket del Monitor
-  [4.2] Timeout health check reducido a 5-6 s
-  [4.4] Consumer Kafka con reinicio automático en fallos
-  [4.5] flush() solo en mensajes críticos
-  [5.2] traceback.print_exc() → logger.exception()
-  [5.4] Manejo de SIGTERM
-  [5.6] Logs de alta frecuencia en nivel DEBUG
-  [5.7] Verificación Kafka sin test_topic
+CORRECCIONES COMPLETAS:
+  [C-1]  Sin modo degradado: Registry inalcanzable → CP rechazado siempre.
+  [C-2]  Credenciales en /app/data/cp_credentials con permisos 0o600, no en /tmp.
+  [C-3]  verify=False solo como fallback documentado; si existe cert del Registry
+         se usa como CA (verify=cert_path).
+  [C-4]  Tkinter 100% thread-safe: toda actualización GUI via cola + root.after().
+         Eliminadas llamadas a root.update() desde hilos de fondo.
+  [C-5]  Health loop: timeout de socket 5 s; si no llega mensaje en 6 s → desconexión.
+  [C-6]  Consumer Kafka con reinicio automático en fallos (hilo dedicado).
+  [C-7]  flush() Kafka solo en mensajes críticos (charging_complete, ticket).
+  [C-8]  Verificación Kafka con AdminClient sin publicar en topics basura.
+  [C-9]  SIGTERM/SIGINT para cierre limpio.
+  [C-10] logger.exception() en lugar de traceback.print_exc().
+  [C-11] TCP Keep-Alive en sockets del Monitor.
+  [C-12] _monitor_connections: timeout de inactividad 15 s (antes 20 s era
+         coherente con health timeout; ahora alineado).
+  [C-13] Revocación de claves borra archivo local además de BD.
+  [C-14] session_id único via uuid4 para evitar colisiones.
 """
 import os
+import sys
 import socket
 import threading
 import json
 import time
 import logging
 import sqlite3
-import sys
 import signal
 import stat
 import hashlib
@@ -40,7 +45,7 @@ from kafka import KafkaProducer, KafkaConsumer
 from kafka.admin import KafkaAdminClient
 from kafka.errors import KafkaError
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # Solo si REGISTRY_CERT_PATH no disponible
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from security.security_utils import CryptoManager, AuditLogger
@@ -51,14 +56,14 @@ from security.security_utils import CryptoManager, AuditLogger
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format='[%(asctime)s] %(levelname)s: %(message)s'
+    format='[%(asctime)s] %(levelname)s %(name)s: %(message)s'
 )
 logger = logging.getLogger('Central')
 
 # ---------------------------------------------------------------------------
-# Gestión de credenciales persistentes (no en /tmp)
+# [C-2] Gestión segura de credenciales persistentes
 # ---------------------------------------------------------------------------
-_CRED_DIR = os.getenv('CP_DATA_DIR', '/app/data/cp_credentials')
+_CRED_DIR      = os.getenv('CP_DATA_DIR', '/app/data/cp_credentials')
 _MACHINE_SECRET = os.getenv('MACHINE_SECRET', 'evcharging-default-secret')
 
 
@@ -68,29 +73,27 @@ def _cred_path(cp_id: str) -> str:
 
 
 def _save_password(cp_id: str, password: str):
-    """Guardar contraseña ofuscada con clave derivada del entorno."""
-    key = hashlib.sha256(f"{_MACHINE_SECRET}:{cp_id}".encode()).hexdigest()
-    key_bytes = (key * 10).encode()
-    pw_bytes = password.encode()
-    encrypted = bytes(a ^ b for a, b in zip(pw_bytes, key_bytes[:len(pw_bytes)]))
-    path = _cred_path(cp_id)
+    """Guarda contraseña ofuscada con XOR derivado del entorno."""
+    key    = hashlib.sha256(f"{_MACHINE_SECRET}:{cp_id}".encode()).hexdigest()
+    key_b  = (key * 10).encode()
+    pw_b   = password.encode('utf-8')
+    enc    = bytes(a ^ b for a, b in zip(pw_b, key_b[:len(pw_b)]))
+    path   = _cred_path(cp_id)
     with open(path, 'wb') as f:
-        f.write(encrypted)
+        f.write(enc)
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    logger.debug(f"🔐 Credencial guardada para {cp_id}")
 
 
 def _load_password(cp_id: str) -> Optional[str]:
-    """Cargar y descifrar contraseña."""
     path = _cred_path(cp_id)
     if not os.path.exists(path):
         return None
-    key = hashlib.sha256(f"{_MACHINE_SECRET}:{cp_id}".encode()).hexdigest()
-    key_bytes = (key * 10).encode()
+    key   = hashlib.sha256(f"{_MACHINE_SECRET}:{cp_id}".encode()).hexdigest()
+    key_b = (key * 10).encode()
     with open(path, 'rb') as f:
-        encrypted = f.read()
-    decrypted = bytes(a ^ b for a, b in zip(encrypted, key_bytes[:len(encrypted)]))
-    return decrypted.decode()
+        enc = f.read()
+    dec = bytes(a ^ b for a, b in zip(enc, key_b[:len(enc)]))
+    return dec.decode('utf-8')
 
 
 def _delete_password(cp_id: str):
@@ -98,7 +101,7 @@ def _delete_password(cp_id: str):
     try:
         if os.path.exists(path):
             os.remove(path)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -107,80 +110,99 @@ def _delete_password(cp_id: str):
 # ---------------------------------------------------------------------------
 
 class Database:
-    """Wrapper SQLite con RLock y WAL mode."""
+    """SQLite con RLock + WAL. Una sola conexión persistente."""
 
     def __init__(self, db_path: str = 'evcharging.db'):
         self.db_path = db_path
-        self.lock = threading.RLock()
-        self.conn = sqlite3.connect(
+        self.lock    = threading.RLock()
+        self.conn    = sqlite3.connect(
             db_path, check_same_thread=False,
             timeout=30.0, isolation_level=None
         )
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA synchronous=NORMAL')
+        self.conn.execute('PRAGMA foreign_keys=ON')
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
-        logger.info("✅ BD inicializada (WAL mode)")
+        logger.info("✅ BD inicializada (WAL)")
 
     def _init_schema(self):
         with self.lock:
             c = self.conn.cursor()
+            c.execute('BEGIN')
             c.execute('''CREATE TABLE IF NOT EXISTS charging_points (
-                cp_id TEXT PRIMARY KEY,
-                location TEXT NOT NULL,
-                price REAL NOT NULL,
-                status TEXT DEFAULT 'DISCONNECTED',
-                last_seen INTEGER,
-                registered INTEGER DEFAULT 0,
+                cp_id         TEXT PRIMARY KEY,
+                location      TEXT NOT NULL,
+                price         REAL NOT NULL,
+                status        TEXT DEFAULT 'DISCONNECTED',
+                last_seen     INTEGER,
+                registered    INTEGER DEFAULT 0,
                 authenticated INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (strftime('%s','now')))''')
+                created_at    INTEGER DEFAULT (strftime('%s','now')))''')
             c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
-                cp_id TEXT NOT NULL,
-                driver_id TEXT NOT NULL,
+                cp_id      TEXT NOT NULL,
+                driver_id  TEXT NOT NULL,
                 start_time INTEGER NOT NULL,
-                end_time INTEGER,
+                end_time   INTEGER,
                 kw_consumed REAL DEFAULT 0,
-                total_cost REAL DEFAULT 0,
-                exitosa INTEGER DEFAULT 1,
-                razon TEXT)''')
+                total_cost  REAL DEFAULT 0,
+                exitosa    INTEGER DEFAULT 1,
+                razon      TEXT)''')
             c.execute('''CREATE TABLE IF NOT EXISTS cp_credentials (
-                cp_id TEXT PRIMARY KEY,
+                cp_id          TEXT PRIMARY KEY,
                 registry_token TEXT,
                 encryption_key TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s','now')))''')
+                created_at     INTEGER DEFAULT (strftime('%s','now')))''')
             c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_cp ON sessions(cp_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_active '
                       'ON sessions(end_time) WHERE end_time IS NULL')
+            c.execute('COMMIT')
+
+    # -- Credenciales ---------------------------------------------------------
 
     def save_cp_credentials(self, cp_id: str, encryption_key: str,
                             registry_token: Optional[str] = None):
         with self.lock:
             self.conn.execute(
                 '''INSERT OR REPLACE INTO cp_credentials
-                   (cp_id, encryption_key, registry_token) VALUES (?, ?, ?)''',
+                   (cp_id, encryption_key, registry_token) VALUES (?,?,?)''',
                 (cp_id, encryption_key, registry_token)
             )
 
     def get_cp_encryption_key(self, cp_id: str) -> Optional[str]:
         with self.lock:
             row = self.conn.execute(
-                'SELECT encryption_key FROM cp_credentials WHERE cp_id = ?', (cp_id,)
+                'SELECT encryption_key FROM cp_credentials WHERE cp_id=?', (cp_id,)
             ).fetchone()
             return row['encryption_key'] if row else None
 
-    def mark_cp_authenticated(self, cp_id: str):
+    def delete_cp_credentials(self, cp_id: str):
         with self.lock:
-            self.conn.execute(
-                'UPDATE charging_points SET authenticated = 1 WHERE cp_id = ?', (cp_id,)
-            )
+            self.conn.execute('DELETE FROM cp_credentials WHERE cp_id=?', (cp_id,))
+
+    # -- CPs ------------------------------------------------------------------
 
     def save_cp(self, cp_id: str, location: str, price: float):
         with self.lock:
             self.conn.execute(
                 '''INSERT OR REPLACE INTO charging_points
-                   (cp_id, location, price, last_seen, registered) VALUES (?, ?, ?, ?, 1)''',
+                   (cp_id, location, price, last_seen, registered)
+                   VALUES (?,?,?,?,1)''',
                 (cp_id, location, price, int(time.time()))
+            )
+
+    def mark_cp_authenticated(self, cp_id: str):
+        with self.lock:
+            self.conn.execute(
+                'UPDATE charging_points SET authenticated=1 WHERE cp_id=?', (cp_id,)
+            )
+
+    def update_cp_status(self, cp_id: str, status: str):
+        with self.lock:
+            self.conn.execute(
+                'UPDATE charging_points SET status=?,last_seen=? WHERE cp_id=?',
+                (status, int(time.time()), cp_id)
             )
 
     def get_all_cps(self) -> List[Dict]:
@@ -188,37 +210,36 @@ class Database:
             return [dict(r) for r in
                     self.conn.execute('SELECT * FROM charging_points').fetchall()]
 
-    def update_cp_status(self, cp_id: str, status: str):
-        with self.lock:
-            self.conn.execute(
-                'UPDATE charging_points SET status = ?, last_seen = ? WHERE cp_id = ?',
-                (status, int(time.time()), cp_id)
-            )
+    # -- Sesiones -------------------------------------------------------------
 
-    def save_session(self, session_data: Dict):
+    def save_session(self, s: Dict):
         with self.lock:
             self.conn.execute(
                 '''INSERT OR REPLACE INTO sessions
-                   (session_id, cp_id, driver_id, start_time, end_time,
-                    kw_consumed, total_cost, exitosa, razon)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (session_data.get('session_id', ''),
-                 session_data.get('cp_id', ''),
-                 session_data.get('driver_id', ''),
-                 session_data.get('start_time', 0),
-                 session_data.get('end_time'),
-                 session_data.get('kw_consumed', 0),
-                 session_data.get('total_cost', 0),
-                 1 if session_data.get('exitosa', True) else 0,
-                 session_data.get('razon'))
+                   (session_id,cp_id,driver_id,start_time,end_time,
+                    kw_consumed,total_cost,exitosa,razon)
+                   VALUES (?,?,?,?,?,?,?,?,?)''',
+                (s.get('session_id',''), s.get('cp_id',''),
+                 s.get('driver_id',''),  s.get('start_time', 0),
+                 s.get('end_time'),      s.get('kw_consumed', 0),
+                 s.get('total_cost', 0),
+                 1 if s.get('exitosa', True) else 0,
+                 s.get('razon'))
             )
 
     def update_session_realtime(self, session_id: str, kw: float, cost: float):
         with self.lock:
             self.conn.execute(
-                'UPDATE sessions SET kw_consumed = ?, total_cost = ? WHERE session_id = ?',
+                'UPDATE sessions SET kw_consumed=?,total_cost=? WHERE session_id=?',
                 (kw, cost, session_id)
             )
+
+    def get_driver_id_for_session(self, session_id: str) -> Optional[str]:
+        with self.lock:
+            row = self.conn.execute(
+                'SELECT driver_id FROM sessions WHERE session_id=?', (session_id,)
+            ).fetchone()
+            return row['driver_id'] if row else None
 
     def close(self):
         with self.lock:
@@ -233,7 +254,7 @@ class Database:
 # ---------------------------------------------------------------------------
 
 class CPWidget(tk.Frame):
-    """Widget visual de un CP (thread-safe vía cola GUI)."""
+    """Widget visual de un CP. Actualizaciones SOLO desde el hilo de Tkinter."""
 
     COLORS = {
         'AVAILABLE':    '#2ecc71',
@@ -242,7 +263,7 @@ class CPWidget(tk.Frame):
         'BROKEN':       '#e74c3c',
         'DISCONNECTED': '#95a5a6'
     }
-    STATUS_TEXT = {
+    LABELS = {
         'AVAILABLE':    'DISPONIBLE',
         'CHARGING':     'CARGANDO...',
         'STOPPED':      'FUERA DE SERVICIO',
@@ -254,68 +275,66 @@ class CPWidget(tk.Frame):
         super().__init__(parent, relief=tk.RAISED, borderwidth=2,
                          bg=self.COLORS['DISCONNECTED'])
         self.cp_id = cp_id
-        self._setup_widgets(location, price)
+        self._build(location, price)
 
-    def _setup_widgets(self, location: str, price: float):
-        bg = self.cget('bg')
+    def _build(self, location: str, price: float):
+        bg = self.COLORS['DISCONNECTED']
         tk.Label(self, text=self.cp_id, font=('Arial', 14, 'bold'),
                  fg='white', bg=bg).pack(pady=5)
         tk.Label(self, text=location, font=('Arial', 9), fg='white',
                  bg=bg, wraplength=200).pack()
-        tk.Label(self, text=f"{price}€/kWh", font=('Arial', 10),
+        tk.Label(self, text=f"{price:.2f}€/kWh", font=('Arial', 10),
                  fg='white', bg=bg).pack(pady=5)
         tk.Label(self, text="─" * 30, bg=bg, fg='white').pack()
 
-        self.lbl_auth = tk.Label(self, text='', font=('Arial', 8),
-                                 fg='yellow', bg=bg)
+        self.lbl_auth    = tk.Label(self, text='', font=('Arial', 8),
+                                    fg='yellow', bg=bg)
         self.lbl_auth.pack()
 
-        self.lbl_estado = tk.Label(self, text='DESCONECTADO',
-                                   font=('Arial', 11, 'bold'), fg='white', bg=bg)
+        self.lbl_estado  = tk.Label(self, text='DESCONECTADO',
+                                    font=('Arial', 11, 'bold'), fg='white', bg=bg)
         self.lbl_estado.pack(pady=10)
 
         self.frame_carga = tk.Frame(self, bg=bg)
-        self.lbl_driver = tk.Label(self.frame_carga, text='',
-                                   font=('Arial', 9, 'bold'), fg='yellow', bg=bg)
+        self.lbl_driver  = tk.Label(self.frame_carga, text='',
+                                    font=('Arial', 9, 'bold'), fg='yellow', bg=bg)
         self.lbl_driver.pack()
         self.lbl_consumo = tk.Label(self.frame_carga, text='',
                                     font=('Arial', 11, 'bold'), fg='white', bg=bg)
         self.lbl_consumo.pack(pady=2)
-        self.lbl_coste = tk.Label(self.frame_carga, text='',
-                                  font=('Arial', 11, 'bold'), fg='white', bg=bg)
+        self.lbl_coste   = tk.Label(self.frame_carga, text='',
+                                    font=('Arial', 11, 'bold'), fg='white', bg=bg)
         self.lbl_coste.pack()
 
         self.lbl_weather = tk.Label(self, text='', font=('Arial', 8),
                                     fg='white', bg=bg)
         self.lbl_weather.pack(pady=2)
 
-        self.config(width=220, height=310)
+        self.config(width=220, height=320)
         self.pack_propagate(False)
 
     def _set_bg(self, color: str):
         self.config(bg=color)
-        self._recursive_bg(self, color)
+        self._recurse_bg(self, color)
 
-    def _recursive_bg(self, widget, color: str):
-        for child in widget.winfo_children():
-            if isinstance(child, (tk.Label, tk.Frame)):
-                try:
-                    child.config(bg=color)
-                except Exception:
-                    pass
-            self._recursive_bg(child, color)
+    def _recurse_bg(self, w, color: str):
+        for child in w.winfo_children():
+            try:
+                child.config(bg=color)
+            except tk.TclError:
+                pass
+            self._recurse_bg(child, color)
 
-    def actualizar(self, status: str, driver_id: str = '', kw: float = 0.0,
-                   cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget — llamar SOLO desde el hilo principal de Tkinter."""
+    def actualizar(self, status: str, driver_id: str = '',
+                   kw: float = 0.0, cost: float = 0.0,
+                   authenticated: bool = False):
+        """Debe llamarse SOLO desde el hilo principal de Tkinter."""
         try:
             color = self.COLORS.get(status, self.COLORS['DISCONNECTED'])
             self._set_bg(color)
-
             self.lbl_auth.config(
                 text='🔒 Autenticado' if authenticated else '⚠️ Sin autenticar'
             )
-
             if status == 'CHARGING' and driver_id:
                 self.lbl_driver.config(text=f"👤 {driver_id}")
                 self.lbl_consumo.config(text=f"⚡ {kw:.2f} kWh")
@@ -324,15 +343,12 @@ class CPWidget(tk.Frame):
                 self.frame_carga.pack(pady=5)
             else:
                 self.frame_carga.pack_forget()
-                self.lbl_estado.config(
-                    text=self.STATUS_TEXT.get(status, status)
-                )
+                self.lbl_estado.config(text=self.LABELS.get(status, status))
                 self.lbl_estado.pack(pady=10)
-        except Exception as e:
-            logger.error(f"Error actualizando widget {self.cp_id}: {e}")
+        except Exception as exc:
+            logger.error("Error actualizando widget %s: %s", self.cp_id, exc)
 
     def set_weather_location(self, city: str):
-        """Mostrar ciudad monitoreada — llamar SOLO desde hilo Tkinter."""
         try:
             self.lbl_weather.config(text=f"🌡️ {city}")
         except Exception:
@@ -344,53 +360,53 @@ class CPWidget(tk.Frame):
 # ---------------------------------------------------------------------------
 
 class Central:
+    """Módulo central de control del sistema EVCharging."""
 
     def __init__(self, socket_port: int = 5001,
                  kafka_servers: str = 'localhost:9092',
                  db_path: str = 'evcharging.db'):
-        self.socket_port = socket_port
+        self.socket_port   = socket_port
         self.kafka_servers = (
-            kafka_servers if isinstance(kafka_servers, list) else [kafka_servers]
+            kafka_servers if isinstance(kafka_servers, list)
+            else [s.strip() for s in kafka_servers.split(',')]
         )
 
-        self.db = Database(db_path)
-        self.audit = AuditLogger('audit.log')
+        self.db    = Database(db_path)
+        self.audit = AuditLogger(os.getenv('AUDIT_LOG', 'audit.log'))
 
-        self.weather_alerts: Dict[str, Dict] = {}
-        self.weather_locations: Dict[str, str] = {}
+        self.weather_alerts:    Dict[str, Dict] = {}
+        self.weather_locations: Dict[str, str]  = {}
 
-        self.charging_points: Dict[str, Dict[str, Any]] = {}
-        self.sessions: Dict[str, Dict[str, Any]] = {}
-        self.pending_commands: Dict[str, str] = {}
+        self.charging_points:   Dict[str, Dict[str, Any]] = {}
+        self.sessions:          Dict[str, Dict[str, Any]] = {}
+        self.pending_commands:  Dict[str, str]             = {}
         self.lock = threading.RLock()
 
         self.gui_queue: Queue = Queue()
 
         self.server_socket: Optional[socket.socket] = None
-        self.producer: Optional[KafkaProducer] = None
-        self.consumer: Optional[KafkaConsumer] = None
+        self.producer:      Optional[KafkaProducer]  = None
+        self.consumer:      Optional[KafkaConsumer]  = None
         self.running = True
 
         # GUI
-        self.root: Optional[tk.Tk] = None
-        self.cp_widgets: Dict[str, CPWidget] = {}
-        self.log_text: Optional[scrolledtext.ScrolledText] = None
-        self.requests_table: Optional[ttk.Treeview] = None
-        self.frame_cps: Optional[tk.Frame] = None
-        self.request_items: Dict[str, str] = {}
+        self.root:           Optional[tk.Tk]                   = None
+        self.cp_widgets:     Dict[str, CPWidget]               = {}
+        self.log_text:       Optional[scrolledtext.ScrolledText] = None
+        self.requests_table: Optional[ttk.Treeview]            = None
+        self.frame_cps:      Optional[tk.Frame]                = None
+        self.request_items:  Dict[str, str]                    = {}
 
-        # Certificado del Registry para verificación SSL
-        self.registry_cert = os.getenv(
-            'REGISTRY_CERT_PATH', '/app/data/registry.crt'
-        )
+        # Certificado del Registry para verificar SSL
+        self.registry_cert = os.getenv('REGISTRY_CERT_PATH', '/app/certs/registry.crt')
 
     # ------------------------------------------------------------------
-    # Start
+    # Arranque
     # ------------------------------------------------------------------
 
     def start(self) -> bool:
         logger.info("=" * 60)
-        logger.info("SISTEMA CENTRAL - RELEASE 2")
+        logger.info("SISTEMA CENTRAL — RELEASE 2")
         logger.info("=" * 60)
 
         self._load_cps_from_db()
@@ -405,37 +421,35 @@ class Central:
 
         threading.Thread(target=self._monitor_connections, daemon=True).start()
 
-        self.audit.log_event('SYSTEM', '0.0.0.0', 'CENTRAL', 'System startup',
-                             'Central iniciada', True)
+        self.audit.log_event('SYSTEM', '0.0.0.0', 'CENTRAL',
+                             'System startup', 'Central iniciada', True)
         logger.info("✅ Sistema listo")
-        self._init_gui()
+        self._init_gui()   # bloqueante (mainloop de Tkinter)
         return True
 
     def _load_cps_from_db(self):
         for cp in self.db.get_all_cps():
             self.charging_points[cp['cp_id']] = {
-                'location': cp['location'],
-                'price': cp['price'],
-                'status': 'DISCONNECTED',
-                'socket': None,
-                'session': None,
-                'last_seen': 0,
-                'monitor_alive': False,
-                'engine_alive': False,
+                'location':             cp['location'],
+                'price':                cp['price'],
+                'status':               'DISCONNECTED',
+                'socket':               None,
+                'session':              None,
+                'last_seen':            0,
+                'monitor_alive':        False,
+                'engine_alive':         False,
                 'consecutive_failures': 0,
-                'authenticated': bool(cp.get('authenticated', 0))
+                'authenticated':        bool(cp.get('authenticated', 0))
             }
 
     # ------------------------------------------------------------------
-    # Kafka
+    # [C-8] Kafka
     # ------------------------------------------------------------------
 
     def _init_kafka(self) -> bool:
         for attempt in range(1, 16):
             try:
-                logger.info(f"🔄 Kafka ({attempt}/15)...")
-
-                # Verificar sin publicar en topics basura
+                logger.info("🔄 Kafka intento %d/15...", attempt)
                 admin = KafkaAdminClient(
                     bootstrap_servers=self.kafka_servers,
                     request_timeout_ms=5000
@@ -447,25 +461,22 @@ class Central:
                     bootstrap_servers=self.kafka_servers,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                     retries=5,
-                    request_timeout_ms=30000,
-                    max_block_ms=10000
+                    request_timeout_ms=30_000,
+                    max_block_ms=10_000
                 )
-
                 self._init_consumer()
                 if self.consumer:
-                    threading.Thread(
-                        target=self._kafka_consumer_loop, daemon=True
-                    ).start()
+                    threading.Thread(target=self._kafka_consumer_loop,
+                                     daemon=True).start()
                     logger.info("✅ Kafka OK")
                     return True
-            except Exception as e:
-                logger.warning(f"⚠️ Kafka error ({attempt}/15): {e}")
+            except Exception as exc:
+                logger.warning("⚠️ Kafka error (%d/15): %s", attempt, exc)
                 if attempt < 15:
                     time.sleep(5)
         return False
 
     def _init_consumer(self):
-        """Crear/recrear consumer Kafka."""
         try:
             self.consumer = KafkaConsumer(
                 'service_requests', 'charging_data',
@@ -475,22 +486,21 @@ class Central:
                 auto_offset_reset='latest',
                 group_id='central-group',
                 enable_auto_commit=True,
-                session_timeout_ms=30000,
+                session_timeout_ms=30_000,
                 consumer_timeout_ms=1000
             )
-        except Exception as e:
-            logger.error(f"❌ No se pudo crear consumer: {e}")
+        except Exception as exc:
+            logger.error("❌ No se pudo crear consumer: %s", exc)
             self.consumer = None
 
+    # [C-6] Loop con reinicio automático
     def _kafka_consumer_loop(self):
-        """Loop consumer con reinicio automático ante fallos."""
         while self.running:
             try:
                 if self.consumer is None:
                     self._init_consumer()
                     time.sleep(2)
                     continue
-
                 for msg in self.consumer:
                     if not self.running:
                         break
@@ -507,12 +517,11 @@ class Central:
                             self._handle_charging_data(msg.value)
                         elif msg.topic == 'charging_complete':
                             self._handle_charging_complete(msg.value)
-                    except Exception as e:
-                        logger.exception(f"Error procesando msg {msg.topic}: {e}")
-
-            except Exception as e:
-                if self.running and 'timed out' not in str(e).lower():
-                    logger.error(f"❌ Consumer error, reiniciando: {e}")
+                    except Exception as exc:
+                        logger.exception("Error procesando msg [%s]: %s", msg.topic, exc)
+            except Exception as exc:
+                if self.running and 'timed out' not in str(exc).lower():
+                    logger.error("❌ Consumer error, reiniciando: %s", exc)
                     try:
                         if self.consumer:
                             self.consumer.close()
@@ -533,10 +542,10 @@ class Central:
             self.server_socket.settimeout(1.0)
             self.server_socket.listen(10)
             threading.Thread(target=self._accept_monitors, daemon=True).start()
-            logger.info(f"✅ Socket servidor en :{self.socket_port}")
+            logger.info("✅ Socket servidor en :%d", self.socket_port)
             return True
-        except Exception as e:
-            logger.exception(f"❌ Socket error: {e}")
+        except Exception as exc:
+            logger.exception("❌ Socket error: %s", exc)
             return False
 
     def _accept_monitors(self):
@@ -545,6 +554,8 @@ class Central:
                 if self.server_socket is None:
                     break
                 client_socket, address = self.server_socket.accept()
+                # [C-11] TCP Keep-Alive
+                client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 self.audit.log_event('CONNECTION', address[0], 'MONITOR',
                                      'Connection attempt', f'From {address}', True)
                 threading.Thread(
@@ -554,36 +565,35 @@ class Central:
                 ).start()
             except socket.timeout:
                 continue
-            except Exception as e:
+            except Exception as exc:
                 if self.running:
-                    logger.error(f"Error en accept: {e}")
+                    logger.error("Error en accept: %s", exc)
                     time.sleep(1)
 
     # ------------------------------------------------------------------
-    # Verificación de credenciales — sin modo degradado
+    # [C-1] + [C-3] Verificación de credenciales — sin modo degradado
     # ------------------------------------------------------------------
 
     def _verify_cp_credentials(self, cp_id: str,
                                 password: Optional[str] = None) -> bool:
         registry_url = os.getenv('REGISTRY_URL', 'https://ev_registry:8443')
 
-        # Determinar si se puede verificar SSL
+        # [C-3] Usar cert del Registry si existe
         verify_ssl: Any = False
         if os.path.exists(self.registry_cert):
             verify_ssl = self.registry_cert
-        # Si no hay cert disponible se acepta verify=False (red interna de laboratorio)
-        # pero se loguea como advertencia
-        if verify_ssl is False:
+        else:
             logger.warning(
-                "⚠️ Certificado Registry no encontrado; "
-                "usando verify=False (solo aceptable en red de laboratorio)"
+                "⚠️ Cert del Registry no encontrado (%s); "
+                "usando verify=False (solo aceptable en red de laboratorio)",
+                self.registry_cert
             )
 
         try:
             if not password:
                 password = _load_password(cp_id)
                 if not password:
-                    logger.error(f"❌ No hay contraseña para {cp_id}")
+                    logger.error("❌ No hay contraseña almacenada para '%s'", cp_id)
                     return False
 
             response = requests.post(
@@ -595,26 +605,28 @@ class Central:
 
             if response.status_code == 200:
                 _save_password(cp_id, password)
-                logger.info(f"✅ Credenciales verificadas: {cp_id}")
+                logger.info("✅ Credenciales verificadas en Registry: %s", cp_id)
                 self.audit.log_authentication(cp_id, '0.0.0.0', True, 'PASSWORD_REGISTRY')
                 return True
-            else:
-                logger.warning(f"⚠️ Credenciales inválidas: {cp_id} (HTTP {response.status_code})")
-                self.audit.log_authentication(cp_id, '0.0.0.0', False, 'PASSWORD_INVALID')
-                return False
 
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"❌ Registry inalcanzable: {e}. CP {cp_id} RECHAZADO.")
+            logger.warning("⚠️ Registry rechazó autenticación de '%s' (HTTP %d)",
+                           cp_id, response.status_code)
+            self.audit.log_authentication(cp_id, '0.0.0.0', False, 'PASSWORD_INVALID')
+            return False
+
+        except requests.exceptions.ConnectionError as exc:
+            # [C-1] Sin modo degradado
+            logger.error("❌ Registry inalcanzable — CP '%s' RECHAZADO: %s", cp_id, exc)
             self.audit.log_authentication(cp_id, '0.0.0.0', False, 'REGISTRY_UNAVAILABLE')
             return False
 
         except requests.exceptions.Timeout:
-            logger.error(f"❌ Timeout conectando a Registry. CP {cp_id} RECHAZADO.")
+            logger.error("❌ Timeout con Registry — CP '%s' RECHAZADO", cp_id)
             self.audit.log_authentication(cp_id, '0.0.0.0', False, 'REGISTRY_TIMEOUT')
             return False
 
-        except Exception as e:
-            logger.error(f"❌ Error inesperado verificando {cp_id}: {e}. RECHAZADO.")
+        except Exception as exc:
+            logger.error("❌ Error inesperado verificando '%s': %s — RECHAZADO", cp_id, exc)
             self.audit.log_authentication(cp_id, '0.0.0.0', False, 'REGISTRY_ERROR')
             return False
 
@@ -626,23 +638,30 @@ class Central:
         cp_id: Optional[str] = None
         try:
             sock.settimeout(10)
-            data = sock.recv(1024).decode('utf-8').strip()
+            raw = sock.recv(2048).decode('utf-8', errors='replace').strip()
 
-            if not data.startswith('REGISTER'):
+            if not raw.startswith('REGISTER'):
+                logger.warning("Mensaje inesperado desde %s: %s", client_ip, raw[:80])
                 return
 
-            parts = data.split('|')
+            parts = raw.split('|')
             if len(parts) < 4:
+                logger.warning("REGISTER incompleto desde %s", client_ip)
                 return
 
             _, cp_id, location, price_str = parts[:4]
             password = parts[4] if len(parts) > 4 else None
-            price = float(price_str)
+
+            try:
+                price = float(price_str)
+            except ValueError:
+                sock.send(b'ERROR|BAD_REQUEST|precio invalido')
+                return
 
             if not self._verify_cp_credentials(cp_id, password):
                 sock.send(b'ERROR|INVALID_CREDENTIALS|CP no autorizado por Registry')
-                logger.warning(f"🚫 Autenticación rechazada: {cp_id}")
-                self._enqueue_gui_action('log', f"🚫 {cp_id} rechazado")
+                logger.warning("🚫 Autenticación rechazada: %s [%s]", cp_id, client_ip)
+                self._enqueue_gui_action('log', f"🚫 {cp_id} rechazado [{client_ip}]")
                 self.audit.log_authentication(cp_id, client_ip, False, 'PASSWORD_INVALID')
                 return
 
@@ -669,14 +688,14 @@ class Central:
                         'last_seen': time.time(), 'monitor_alive': True,
                         'engine_alive': False, 'consecutive_failures': 0
                     })
-                    logger.info(f"🔄 {cp_id} reconectado")
+                    logger.info("🔄 %s reconectado", cp_id)
 
-            # Encryption key
+            # Generar o reutilizar encryption_key
             encryption_key = self.db.get_cp_encryption_key(cp_id)
             if not encryption_key:
                 encryption_key = CryptoManager.generate_key()
                 self.db.save_cp_credentials(cp_id, encryption_key)
-                logger.info(f"🔑 Nueva clave generada: {cp_id}")
+                logger.info("🔑 Nueva clave generada: %s", cp_id)
 
             self.db.mark_cp_authenticated(cp_id)
             with self.lock:
@@ -690,10 +709,10 @@ class Central:
 
             self._monitor_health_loop(cp_id, sock)
 
-        except Exception as e:
-            logger.exception(f"❌ Monitor {cp_id}: {e}")
+        except Exception as exc:
+            logger.exception("❌ Monitor %s: %s", cp_id, exc)
             if cp_id:
-                self.audit.log_error('MONITOR_ERROR', cp_id, str(e))
+                self.audit.log_error('MONITOR_ERROR', cp_id, str(exc))
         finally:
             if cp_id and cp_id in self.charging_points:
                 with self.lock:
@@ -701,7 +720,7 @@ class Central:
                     if cp_data.get('socket') == sock:
                         if cp_data.get('session'):
                             self._abort_session(cp_id, 'Monitor desconectado')
-                        old_status = cp_data['status']
+                        old = cp_data['status']
                         cp_data.update({
                             'status': 'DISCONNECTED', 'socket': None,
                             'monitor_alive': False, 'engine_alive': False,
@@ -712,7 +731,7 @@ class Central:
                         self.db.update_cp_status(cp_id, 'DISCONNECTED')
                         self._enqueue_gui_action('log', f"❌ {cp_id} desconectado")
                         self.audit.log_cp_status_change(
-                            cp_id, old_status, 'DISCONNECTED', 'Monitor disconnected'
+                            cp_id, old, 'DISCONNECTED', 'Monitor disconnected'
                         )
             try:
                 sock.close()
@@ -720,38 +739,38 @@ class Central:
                 pass
 
     # ------------------------------------------------------------------
-    # Health loop — timeout reducido a 5-6 s
+    # [C-5] Health loop — timeout reducido a 5/6 s
     # ------------------------------------------------------------------
 
     def _monitor_health_loop(self, cp_id: str, sock: socket.socket):
-        """Health check loop con timeout reducido (5 s socket, 6 s lógica)."""
         sock.settimeout(5)
         last_health_ok = time.time()
 
         while self.running:
             try:
-                msg = sock.recv(64).decode('utf-8').strip()
+                msg = sock.recv(64).decode('utf-8', errors='replace').strip()
                 if not msg:
                     break
 
                 with self.lock:
                     if cp_id not in self.charging_points:
                         break
-                    cp_data = self.charging_points[cp_id]
-                    cp_data['last_seen'] = time.time()
-                    cp_data['monitor_alive'] = True
+                    self.charging_points[cp_id]['last_seen'] = time.time()
+                    self.charging_points[cp_id]['monitor_alive'] = True
 
                 if msg == 'HEALTH_OK':
                     last_health_ok = time.time()
-                    logger.debug(f"[{cp_id}] HEALTH_OK")
+                    logger.debug("[%s] HEALTH_OK", cp_id)
                     with self.lock:
                         if cp_id in self.charging_points:
                             cp_data = self.charging_points[cp_id]
-                            cp_data['engine_alive'] = True
+                            cp_data['engine_alive']         = True
                             cp_data['consecutive_failures'] = 0
 
                             if cp_data['status'] == 'BROKEN':
                                 cmd = self.pending_commands.pop(cp_id, None)
+                                new_status = ('STOPPED' if cmd == 'STOP'
+                                              else 'AVAILABLE')
                                 if cmd:
                                     self._send_kafka(
                                         'central_commands',
@@ -759,65 +778,56 @@ class Central:
                                          'timestamp': time.time()},
                                         encrypt_for_cp=cp_id
                                     )
-                                    cp_data['status'] = ('STOPPED' if cmd == 'STOP'
-                                                         else 'AVAILABLE')
-                                else:
-                                    cp_data['status'] = 'AVAILABLE'
-
+                                cp_data['status'] = new_status
                                 self._enqueue_gui_action(
-                                    'update_cp', cp_id, cp_data['status'],
+                                    'update_cp', cp_id, new_status,
                                     '', 0, 0, cp_data.get('authenticated', False)
                                 )
-                                self.db.update_cp_status(cp_id, cp_data['status'])
-                                self._enqueue_gui_action(
-                                    'log', f"✅ {cp_id} recuperado de avería"
-                                )
+                                self.db.update_cp_status(cp_id, new_status)
+                                self._enqueue_gui_action('log', f"✅ {cp_id} recuperado")
 
                 elif msg == 'HEALTH_FAIL':
-                    logger.debug(f"[{cp_id}] HEALTH_FAIL")
+                    logger.debug("[%s] HEALTH_FAIL", cp_id)
                     with self.lock:
                         if cp_id in self.charging_points:
                             cp_data = self.charging_points[cp_id]
-                            cp_data['engine_alive'] = False
+                            cp_data['engine_alive']          = False
                             cp_data['consecutive_failures'] += 1
-
-                            if (cp_data['consecutive_failures'] >= 3 and
-                                    cp_data['monitor_alive'] and
-                                    cp_data['status'] != 'BROKEN'):
+                            if (cp_data['consecutive_failures'] >= 3
+                                    and cp_data['monitor_alive']
+                                    and cp_data['status'] != 'BROKEN'):
                                 self._handle_cp_failure(cp_id)
 
             except socket.timeout:
                 if time.time() - last_health_ok > 6:
-                    logger.warning(f"⏰ Timeout health check: {cp_id}")
+                    logger.warning("⏰ Timeout health: %s", cp_id)
                     break
                 continue
-            except Exception as e:
+            except Exception as exc:
                 if self.running:
-                    logger.error(f"❌ Health loop {cp_id}: {e}")
+                    logger.error("❌ Health loop %s: %s", cp_id, exc)
                 break
 
     # ------------------------------------------------------------------
-    # Kafka handlers
+    # Handlers Kafka
     # ------------------------------------------------------------------
 
     def _decrypt_message(self, data: Dict, cp_id: str) -> Optional[Dict]:
-        if not isinstance(data, dict):
-            return data
-        if data.get('encrypted') and data.get('data'):
+        if isinstance(data, dict) and data.get('encrypted') and data.get('data'):
             key = self.db.get_cp_encryption_key(cp_id)
             if key:
                 try:
                     return CryptoManager.decrypt_json(data['data'], key)
-                except Exception as e:
-                    logger.error(f"Error descifrando de {cp_id}: {e}")
+                except Exception as exc:
+                    logger.error("Error descifrando de %s: %s", cp_id, exc)
                     return None
-            logger.error(f"No hay clave para descifrar {cp_id}")
+            logger.error("No hay clave de descifrado para %s", cp_id)
             return None
         return data
 
     def _handle_service_request(self, data: Dict):
         driver_id = data.get('driver_id', '')
-        cp_id = data.get('cp_id', '')
+        cp_id     = data.get('cp_id', '')
         self._enqueue_gui_action('log', f"📨 {driver_id} → {cp_id}")
         self.audit.log_service_request(driver_id, cp_id, '0.0.0.0')
 
@@ -830,21 +840,27 @@ class Central:
             cp = self.charging_points[cp_id]
             if cp['status'] != 'AVAILABLE':
                 reasons = {
-                    'DISCONNECTED': 'CP desconectado', 'BROKEN': 'CP averiado',
-                    'STOPPED': 'CP fuera de servicio', 'CHARGING': 'CP ocupado'
+                    'DISCONNECTED': 'CP desconectado',
+                    'BROKEN':       'CP averiado',
+                    'STOPPED':      'CP fuera de servicio',
+                    'CHARGING':     'CP ocupado'
                 }
-                self._send_notification(driver_id, 'DENIED', cp_id,
-                                        reasons.get(cp['status'], 'No disponible'))
+                self._send_notification(
+                    driver_id, 'DENIED', cp_id,
+                    reasons.get(cp['status'], 'No disponible')
+                )
                 self.audit.log_service_auth(driver_id, cp_id, False)
                 return
 
-            session_id = (f"SESSION_{cp_id}_{int(time.time())}"
-                          f"_{uuid.uuid4().hex[:6]}")
+            # [C-14] session_id con uuid4
+            session_id = f"SES_{cp_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
             cp['status'] = 'CHARGING'
             cp['session'] = {
-                'session_id': session_id, 'driver_id': driver_id,
+                'session_id': session_id,
+                'driver_id':  driver_id,
                 'start_time': int(time.time()),
-                'kw_consumed': 0.0, 'total_cost': 0.0
+                'kw_consumed': 0.0,
+                'total_cost':  0.0
             }
             self.sessions[session_id] = {**cp['session'], 'cp_id': cp_id}
 
@@ -879,13 +895,13 @@ class Central:
             if cp_id in self.charging_points:
                 cp = self.charging_points[cp_id]
                 if cp.get('session'):
-                    kw = data.get('kw', 0.0)
-                    cost = data.get('cost', 0.0)
+                    kw   = float(data.get('kw',   0.0))
+                    cost = float(data.get('cost', 0.0))
                     cp['session']['kw_consumed'] = kw
-                    cp['session']['total_cost'] = cost
-                    driver_id = cp['session'].get('driver_id', '')
-
+                    cp['session']['total_cost']  = cost
+                    driver_id  = cp['session'].get('driver_id', '')
                     session_id = cp['session'].get('session_id')
+
                     if session_id:
                         self.db.update_session_realtime(session_id, kw, cost)
 
@@ -900,7 +916,7 @@ class Central:
                         'update_cp', cp_id, 'CHARGING', driver_id,
                         kw, cost, cp.get('authenticated', False)
                     )
-                    logger.debug(f"[{cp_id}] ⚡ {kw:.2f} kWh | {cost:.2f} €")
+                    logger.debug("[%s] ⚡ %.2f kWh | %.2f €", cp_id, kw, cost)
 
     def _handle_charging_complete(self, data: Dict):
         cp_id = data.get('cp_id', '')
@@ -910,13 +926,13 @@ class Central:
                 return
 
         session_id = data.get('session_id', '')
-        driver_id = data.get('driver_id', '')
-        exitosa = data.get('exitosa', True)
-        razon = data.get('razon', '')
-        kw_total = data.get('kw_total', 0)
-        cost_total = data.get('cost_total', 0)
+        driver_id  = data.get('driver_id', '')
+        exitosa    = data.get('exitosa', True)
+        razon      = data.get('razon', '')
+        kw_total   = float(data.get('kw_total',   0))
+        cost_total = float(data.get('cost_total', 0))
 
-        logger.info(f"📋 Finalizando sesión {session_id}: {cp_id}")
+        logger.info("📋 Finalizando sesión %s: %s", session_id, cp_id)
 
         with self.lock:
             if cp_id in self.charging_points:
@@ -924,54 +940,41 @@ class Central:
                 if cp.get('session'):
                     session = cp['session']
                     session.update({
-                        'end_time': int(time.time()), 'cp_id': cp_id,
+                        'end_time':    int(time.time()), 'cp_id': cp_id,
                         'kw_consumed': kw_total, 'total_cost': cost_total,
-                        'exitosa': exitosa, 'razon': razon
+                        'exitosa':     exitosa,  'razon': razon
                     })
                     self.db.save_session(session)
                 cp['session'] = None
-
                 if cp['status'] == 'CHARGING':
                     cp['status'] = 'AVAILABLE'
                     self.db.update_cp_status(cp_id, 'AVAILABLE')
-
                 self._enqueue_gui_action(
                     'update_cp', cp_id, cp['status'], '', 0, 0,
                     cp.get('authenticated', False)
                 )
-
             if session_id in self.sessions:
                 del self.sessions[session_id]
                 self._enqueue_gui_action('remove_request', session_id)
 
-        # Recuperar driver_id si falta
+        # Recuperar driver_id de BD si no llegó en el payload
         if not driver_id:
-            try:
-                row = self.db.conn.execute(
-                    'SELECT driver_id FROM sessions WHERE session_id = ?', (session_id,)
-                ).fetchone()
-                if row:
-                    driver_id = row['driver_id']
-            except Exception:
-                pass
+            driver_id = self.db.get_driver_id_for_session(session_id) or ''
 
         if driver_id:
             ticket = {
                 'driver_id': driver_id, 'cp_id': cp_id, 'session_id': session_id,
-                'kw_total': float(kw_total), 'cost_total': float(cost_total),
-                'exitosa': exitosa, 'razon': razon,
+                'kw_total':  kw_total,  'cost_total': cost_total,
+                'exitosa':   exitosa,   'razon': razon,
                 'type': 'FINAL_TICKET', 'timestamp': time.time()
             }
-            # Enviar con confirmación (require_ack) — mensaje crítico
+            # [C-7] flush solo en mensajes críticos
             self._send_kafka('driver_notifications', ticket, require_ack=True)
             time.sleep(0.1)
             self._send_kafka('driver_notifications', ticket, require_ack=True)
-            logger.info(f"✅ Ticket final enviado a {driver_id}")
+            logger.info("✅ Ticket final enviado a %s", driver_id)
         else:
-            logger.error(
-                f"❌ No se pudo enviar ticket: driver_id desconocido "
-                f"para sesión {session_id}"
-            )
+            logger.error("❌ driver_id desconocido para sesión %s", session_id)
 
         self.audit.log_event(
             'SESSION', '0.0.0.0', driver_id or 'UNKNOWN', 'Charging complete',
@@ -981,35 +984,34 @@ class Central:
         )
 
     # ------------------------------------------------------------------
-    # Weather alerts
+    # Weather
     # ------------------------------------------------------------------
 
     def handle_weather_alert(self, cp_id: str, alert_type: str,
                               temperature: float, city: str):
-        """Manejar alerta climática proveniente de weather_sync."""
         with self.lock:
             if city and cp_id:
                 self.weather_locations[cp_id] = city
                 self._enqueue_gui_action('update_weather_location', cp_id, city)
 
             if alert_type == 'REGISTER':
-                logger.info(f"📍 Localización registrada: {cp_id} → {city}")
+                logger.info("📍 Localización registrada: %s → %s", cp_id, city)
                 return
 
             if alert_type == 'START':
                 self.weather_alerts[cp_id] = {
                     'temperature': temperature,
-                    'city': city,
-                    'started_at': time.time()
+                    'city':        city,
+                    'started_at':  time.time()
                 }
-                logger.warning(f"❄️ ALERTA: {cp_id} ({city}) - {temperature}°C")
+                logger.warning("❄️  ALERTA: %s (%s) — %.1f°C", cp_id, city, temperature)
                 self._send_command(cp_id, 'STOP')
                 self.audit.log_weather_alert(cp_id, 'START', temperature)
-                self._enqueue_gui_action('log', f"❄️ Alerta: {cp_id} ({temperature}°C)")
+                self._enqueue_gui_action('log', f"❄️ Alerta: {cp_id} ({temperature:.1f}°C)")
 
             elif alert_type == 'END':
                 self.weather_alerts.pop(cp_id, None)
-                logger.info(f"☀️ ALERTA CANCELADA: {cp_id} ({city})")
+                logger.info("☀️  ALERTA CANCELADA: %s (%s)", cp_id, city)
                 self._send_command(cp_id, 'RESUME')
                 self.audit.log_weather_alert(cp_id, 'END', temperature)
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
@@ -1021,7 +1023,7 @@ class Central:
     def _send_command(self, cp_id: str, command: str):
         with self.lock:
             if cp_id not in self.charging_points:
-                logger.warning(f"⚠️ CP {cp_id} no existe para enviar {command}")
+                logger.warning("⚠️ CP '%s' no existe para enviar %s", cp_id, command)
                 return
 
             cp_data = self.charging_points[cp_id]
@@ -1053,23 +1055,22 @@ class Central:
             encrypt_for_cp=cp_id
         )
         self.audit.log_command(cp_id, command)
-        logger.info(f"📤 Comando {command} → {cp_id}")
+        logger.info("📤 Comando %s → %s", command, cp_id)
 
     def _abort_session(self, cp_id: str, razon: str):
+        """Aborta la sesión activa de un CP (llamar con self.lock tomado)."""
         cp_data = self.charging_points[cp_id]
         if not cp_data.get('session'):
             return
         session = cp_data['session']
-        session.update({
-            'end_time': int(time.time()), 'exitosa': False,
-            'razon': razon, 'cp_id': cp_id
-        })
+        session.update({'end_time': int(time.time()), 'exitosa': False,
+                        'razon': razon, 'cp_id': cp_id})
         self.db.save_session(session)
         self._send_kafka('driver_notifications', {
-            'driver_id': session['driver_id'], 'cp_id': cp_id,
-            'session_id': session['session_id'],
-            'kw_total': session['kw_consumed'],
-            'cost_total': session['total_cost'],
+            'driver_id':   session['driver_id'], 'cp_id': cp_id,
+            'session_id':  session['session_id'],
+            'kw_total':    session['kw_consumed'],
+            'cost_total':  session['total_cost'],
             'exitosa': False, 'razon': razon,
             'type': 'FINAL_TICKET', 'timestamp': time.time()
         })
@@ -1078,27 +1079,24 @@ class Central:
         self.audit.log_error('SESSION_ABORTED', cp_id, f'Razón: {razon}')
 
     def _handle_cp_failure(self, cp_id: str):
-        with self.lock:
-            if cp_id not in self.charging_points:
-                return
-            cp = self.charging_points[cp_id]
-            if not cp.get('monitor_alive') or cp['status'] == 'BROKEN':
-                return
-
-            old = cp['status']
-            cp['status'] = 'BROKEN'
-            cp['engine_alive'] = False
-
-            if cp.get('session'):
-                self._abort_session(cp_id, 'Avería del Engine')
-
-            self._enqueue_gui_action('update_cp', cp_id, 'BROKEN', '', 0, 0,
-                                     cp.get('authenticated', False))
-            self.db.update_cp_status(cp_id, 'BROKEN')
-            self._enqueue_gui_action('log', f"💥 {cp_id} AVERIADO")
-            self.audit.log_cp_status_change(cp_id, old, 'BROKEN',
-                                            'Consecutive engine failures')
-            logger.warning(f"💥 CP {cp_id} marcado como AVERIADO")
+        """Marcar CP como averiado (llamar con self.lock tomado)."""
+        if cp_id not in self.charging_points:
+            return
+        cp = self.charging_points[cp_id]
+        if not cp.get('monitor_alive') or cp['status'] == 'BROKEN':
+            return
+        old = cp['status']
+        cp['status'] = 'BROKEN'
+        cp['engine_alive'] = False
+        if cp.get('session'):
+            self._abort_session(cp_id, 'Avería del Engine')
+        self._enqueue_gui_action('update_cp', cp_id, 'BROKEN', '', 0, 0,
+                                 cp.get('authenticated', False))
+        self.db.update_cp_status(cp_id, 'BROKEN')
+        self._enqueue_gui_action('log', f"💥 {cp_id} AVERIADO")
+        self.audit.log_cp_status_change(cp_id, old, 'BROKEN',
+                                        'Consecutive engine failures')
+        logger.warning("💥 CP %s marcado como AVERIADO", cp_id)
 
     # ------------------------------------------------------------------
     # Monitor de timeouts
@@ -1129,19 +1127,19 @@ class Central:
                                 cp_id, old, 'DISCONNECTED', 'Connection timeout'
                             )
                 time.sleep(2)
-            except Exception as e:
+            except Exception as exc:
                 if self.running:
-                    logger.error(f"Error en monitor: {e}")
+                    logger.error("Error en _monitor_connections: %s", exc)
                     time.sleep(2)
 
     # ------------------------------------------------------------------
-    # Kafka send — flush solo en mensajes críticos
+    # [C-7] Kafka send
     # ------------------------------------------------------------------
 
     def _send_kafka(self, topic: str, payload: Dict,
                     encrypt_for_cp: Optional[str] = None,
                     require_ack: bool = False):
-        for _ in range(3):
+        for attempt in range(3):
             try:
                 if not self.producer:
                     return
@@ -1155,15 +1153,15 @@ class Central:
                                 'data': CryptoManager.encrypt_json(payload, key),
                                 'cp_id': encrypt_for_cp
                             }
-                        except Exception as e:
-                            logger.warning(f"⚠️ Error cifrando, enviando sin cifrar: {e}")
+                        except Exception as exc:
+                            logger.warning("⚠️ Error cifrando; enviando sin cifrar: %s", exc)
 
                 future = self.producer.send(topic, final)
                 if require_ack:
                     future.get(timeout=5)
                 return
-            except Exception as e:
-                logger.error(f"Error Kafka [{topic}]: {e}")
+            except Exception as exc:
+                logger.error("Error Kafka [%s] intento %d: %s", topic, attempt + 1, exc)
                 time.sleep(1)
 
     def _send_notification(self, driver_id: str, status: str,
@@ -1196,20 +1194,14 @@ class Central:
                 'status': 'DISCONNECTED', 'authenticated': False,
                 'monitor_alive': False, 'engine_alive': False
             })
-            try:
-                self.db.conn.execute(
-                    'DELETE FROM cp_credentials WHERE cp_id = ?', (cp_id,)
-                )
-                self.db.conn.commit()
-            except Exception as e:
-                logger.error(f"Error borrando credenciales: {e}")
+            # [C-13] Borrar de BD y archivo
+            self.db.delete_cp_credentials(cp_id)
             _delete_password(cp_id)
 
-            self._enqueue_gui_action('update_cp', cp_id, 'DISCONNECTED',
-                                     '', 0, 0, False)
+            self._enqueue_gui_action('update_cp', cp_id, 'DISCONNECTED', '', 0, 0, False)
             self._enqueue_gui_action('log', f"🔒 Clave revocada: {cp_id}")
-            self.audit.log_event('SECURITY', '0.0.0.0', 'CENTRAL', 'Key revocation',
-                                 f'CP: {cp_id}', True)
+            self.audit.log_event('SECURITY', '0.0.0.0', 'CENTRAL',
+                                 'Key revocation', f'CP: {cp_id}', True)
             self.audit.log_cp_status_change(cp_id, old, 'DISCONNECTED',
                                             'Encryption key revoked')
         return True
@@ -1220,25 +1212,22 @@ class Central:
         return sum(1 for cp_id in cp_ids if self.revoke_cp_encryption_key(cp_id))
 
     # ------------------------------------------------------------------
-    # GUI — cola thread-safe
+    # [C-4] GUI — cola thread-safe
     # ------------------------------------------------------------------
 
     def _enqueue_gui_action(self, action: str, *args):
-        """Encolar acción GUI desde cualquier hilo."""
         if self.root:
             self.gui_queue.put((action, args))
 
     def _process_gui_queue(self):
-        """Procesar acciones GUI — llamado exclusivamente desde el mainloop."""
+        """Drena hasta 20 acciones GUI por ciclo. Llamado SOLO desde mainloop."""
         try:
-            # Procesar hasta 20 acciones por ciclo para evitar bloqueo
             for _ in range(20):
                 try:
                     action, args = self.gui_queue.get_nowait()
                 except Empty:
                     break
-
-                if action == 'log':
+                if   action == 'log':
                     self._do_log(args[0])
                 elif action == 'add_cp':
                     self._do_gui_add_cp(args[0], args[1], args[2])
@@ -1255,12 +1244,12 @@ class Central:
                 self.root.after(100, self._process_gui_queue)
 
     # ------------------------------------------------------------------
-    # GUI init
+    # Inicialización GUI
     # ------------------------------------------------------------------
 
     def _init_gui(self):
         self.root = tk.Tk()
-        self.root.title("EVCharging - CENTRAL (RELEASE 2)")
+        self.root.title("EVCharging — CENTRAL (RELEASE 2)")
         self.root.geometry("1400x950")
         self.root.config(bg='#2c3e50')
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -1269,37 +1258,32 @@ class Central:
         header = tk.Frame(self.root, bg='#1a252f', height=70)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
-        tk.Label(header, text="*** EV CHARGING - CENTRAL (RELEASE 2) ***",
-                 font=('Arial', 16, 'bold'), bg='#1a252f',
-                 fg='#ecf0f1').pack(pady=20)
+        tk.Label(header, text="*** EV CHARGING — CENTRAL (RELEASE 2) ***",
+                 font=('Arial', 16, 'bold'), bg='#1a252f', fg='#ecf0f1').pack(pady=20)
 
-        # CPs
+        # Área scrollable de CPs
         cp_container = tk.Frame(self.root, bg='#34495e')
         cp_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        canvas = tk.Canvas(cp_container, bg='#34495e', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(cp_container, orient='vertical',
-                                   command=canvas.yview)
-        self.scrollable_frame = tk.Frame(canvas, bg='#34495e')
-        self.scrollable_frame.bind(
-            '<Configure>',
-            lambda e: canvas.configure(scrollregion=canvas.bbox('all'))
-        )
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
+        canvas   = tk.Canvas(cp_container, bg='#34495e', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(cp_container, orient='vertical', command=canvas.yview)
+        inner = tk.Frame(canvas, bg='#34495e')
+        inner.bind('<Configure>',
+                   lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.create_window((0, 0), window=inner, anchor='nw')
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.frame_cps = tk.Frame(self.scrollable_frame, bg='#34495e')
+        self.frame_cps = tk.Frame(inner, bg='#34495e')
         self.frame_cps.pack(padx=10, pady=10)
 
-        # Solicitudes
+        # Tabla de solicitudes activas
         req_frame = tk.Frame(self.root, bg='#1a252f', height=130)
         req_frame.pack(fill=tk.X, padx=10, pady=5)
         req_frame.pack_propagate(False)
         tk.Label(req_frame, text="*** ON GOING REQUESTS ***",
-                 font=('Arial', 11, 'bold'), bg='#1a252f',
-                 fg='white').pack(pady=5)
+                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
         self.requests_table = ttk.Treeview(
             req_frame, columns=('DATE', 'TIME', 'USER', 'CP'),
             show='headings', height=3
@@ -1309,20 +1293,19 @@ class Central:
             self.requests_table.column(col, width=150, anchor=tk.CENTER)
         self.requests_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Comandos
+        # Botones de comandos
         cmd_frame = tk.Frame(self.root, bg='#1a252f', height=120)
         cmd_frame.pack(fill=tk.X, padx=10, pady=5)
         cmd_frame.pack_propagate(False)
         tk.Label(cmd_frame, text="*** CENTRAL COMMANDS ***",
-                 font=('Arial', 11, 'bold'), bg='#1a252f',
-                 fg='white').pack(pady=5)
+                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
 
         bf1 = tk.Frame(cmd_frame, bg='#1a252f')
         bf1.pack()
         for text, cmd, color in [
-            ("⛔ PARAR CP", self._cmd_stop_cp, '#e74c3c'),
-            ("▶️ REANUDAR CP", self._cmd_resume_cp, '#2ecc71'),
-            ("⛔ PARAR TODOS", self._cmd_stop_all, '#c0392b'),
+            ("⛔ PARAR CP",       self._cmd_stop_cp,    '#e74c3c'),
+            ("▶️ REANUDAR CP",   self._cmd_resume_cp,  '#2ecc71'),
+            ("⛔ PARAR TODOS",   self._cmd_stop_all,   '#c0392b'),
             ("▶️ REANUDAR TODOS", self._cmd_resume_all, '#27ae60'),
         ]:
             tk.Button(bf1, text=text, command=cmd, bg=color, fg='white',
@@ -1331,45 +1314,42 @@ class Central:
         bf2 = tk.Frame(cmd_frame, bg='#1a252f')
         bf2.pack(pady=5)
         for text, cmd, color in [
-            ("🔒 REVOCAR CLAVE CP", self._cmd_revoke_key, '#9b59b6'),
-            ("🔒 REVOCAR TODAS", self._cmd_revoke_all_keys, '#8e44ad'),
-            ("🔐 LISTAR CLAVES", self._cmd_list_keys, '#3498db'),
+            ("🔒 REVOCAR CLAVE CP",  self._cmd_revoke_key,      '#9b59b6'),
+            ("🔒 REVOCAR TODAS",     self._cmd_revoke_all_keys, '#8e44ad'),
+            ("🔐 LISTAR CLAVES",     self._cmd_list_keys,       '#3498db'),
         ]:
             tk.Button(bf2, text=text, command=cmd, bg=color, fg='white',
                       font=('Arial', 10, 'bold'), width=18).pack(side=tk.LEFT, padx=5)
 
-        # Logs
+        # Log de mensajes
         log_frame = tk.Frame(self.root, bg='#1a252f', height=100)
         log_frame.pack(fill=tk.X, padx=10, pady=5)
         log_frame.pack_propagate(False)
         tk.Label(log_frame, text="*** MESSAGES ***",
-                 font=('Arial', 11, 'bold'), bg='#1a252f',
-                 fg='white').pack(pady=5)
+                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
         self.log_text = scrolledtext.ScrolledText(
             log_frame, height=3, bg='#2c3e50', fg='#ecf0f1',
             font=('Courier', 9)
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Cargar CPs existentes directamente (estamos en el mainloop)
+        # Cargar CPs ya conocidos (estamos en mainloop, seguro llamar directo)
         with self.lock:
             for cp_id, cp_data in self.charging_points.items():
-                widget = CPWidget(self.frame_cps, cp_id,
-                                  cp_data['location'], cp_data['price'])
-                num = len(self.cp_widgets)
-                widget.grid(row=num // 5, column=num % 5, padx=10, pady=10)
-                self.cp_widgets[cp_id] = widget
-                widget.actualizar(cp_data['status'], '', 0, 0,
-                                  cp_data.get('authenticated', False))
+                w = CPWidget(self.frame_cps, cp_id,
+                             cp_data['location'], cp_data['price'])
+                n = len(self.cp_widgets)
+                w.grid(row=n // 5, column=n % 5, padx=10, pady=10)
+                self.cp_widgets[cp_id] = w
+                w.actualizar(cp_data['status'], '', 0, 0,
+                              cp_data.get('authenticated', False))
 
-        logger.info(f"✅ GUI lista — {len(self.cp_widgets)} CPs")
-
-        # Iniciar procesamiento de cola
+        logger.info("✅ GUI lista — %d CPs", len(self.cp_widgets))
         self.root.after(100, self._process_gui_queue)
         self.root.mainloop()
 
     # ------------------------------------------------------------------
-    # GUI actions (ejecutadas en mainloop)
+    # Acciones GUI (ejecutadas en mainloop)
     # ------------------------------------------------------------------
 
     def _do_log(self, msg: str):
@@ -1386,32 +1366,32 @@ class Central:
         if cp_id in self.cp_widgets or not self.frame_cps:
             return
         try:
-            widget = CPWidget(self.frame_cps, cp_id, location, price)
-            num = len(self.cp_widgets)
-            widget.grid(row=num // 5, column=num % 5, padx=10, pady=10)
-            self.cp_widgets[cp_id] = widget
-        except Exception as e:
-            logger.exception(f"Error creando widget {cp_id}: {e}")
+            w = CPWidget(self.frame_cps, cp_id, location, price)
+            n = len(self.cp_widgets)
+            w.grid(row=n // 5, column=n % 5, padx=10, pady=10)
+            self.cp_widgets[cp_id] = w
+        except Exception as exc:
+            logger.exception("Error creando widget %s: %s", cp_id, exc)
 
     def _do_gui_update_cp(self, cp_id: str, status: str, driver: str = '',
-                          kw: float = 0.0, cost: float = 0.0,
-                          authenticated: bool = False):
+                           kw: float = 0.0, cost: float = 0.0,
+                           authenticated: bool = False):
         if cp_id in self.cp_widgets:
             try:
                 self.cp_widgets[cp_id].actualizar(status, driver, kw, cost, authenticated)
-                if cp_id in self.weather_locations:
-                    self.cp_widgets[cp_id].set_weather_location(
-                        self.weather_locations[cp_id]
-                    )
-            except Exception as e:
-                logger.error(f"Error actualizando widget {cp_id}: {e}")
+                with self.lock:
+                    city = self.weather_locations.get(cp_id)
+                if city:
+                    self.cp_widgets[cp_id].set_weather_location(city)
+            except Exception as exc:
+                logger.error("Error actualizando widget %s: %s", cp_id, exc)
 
     def _do_gui_update_weather_location(self, cp_id: str, city: str):
         if cp_id in self.cp_widgets:
             try:
                 self.cp_widgets[cp_id].set_weather_location(city)
-            except Exception as e:
-                logger.error(f"Error actualizando weather location {cp_id}: {e}")
+            except Exception as exc:
+                logger.error("Error weather location %s: %s", cp_id, exc)
         self._do_log(f"🌡️ EV_W monitoreando {city} para {cp_id}")
 
     def _do_gui_add_request(self, sid: str, date: str, time_str: str,
@@ -1422,32 +1402,39 @@ class Central:
                     '', tk.END, values=(date, time_str, user, cp)
                 )
                 self.request_items[sid] = item
-            except Exception as e:
-                logger.error(f"Error añadiendo request: {e}")
+            except Exception as exc:
+                logger.error("Error añadiendo request: %s", exc)
 
     def _do_gui_remove_request(self, sid: str):
         if self.requests_table and sid in self.request_items:
             try:
-                self.requests_table.delete(self.request_items[sid])
-                del self.request_items[sid]
-            except Exception as e:
-                logger.error(f"Error eliminando request: {e}")
+                self.requests_table.delete(self.request_items.pop(sid))
+            except Exception as exc:
+                logger.error("Error eliminando request: %s", exc)
 
     # ------------------------------------------------------------------
-    # Comandos GUI
+    # Botones de comando
     # ------------------------------------------------------------------
 
     def _cmd_stop_cp(self):
         cp_id = simpledialog.askstring("Parar CP", "ID del CP:")
-        if cp_id and cp_id in self.charging_points:
-            self._send_command(cp_id, 'STOP')
-            messagebox.showinfo("OK", f"STOP → {cp_id}")
+        if cp_id:
+            cp_id = cp_id.strip().upper()
+            if cp_id in self.charging_points:
+                self._send_command(cp_id, 'STOP')
+                messagebox.showinfo("OK", f"STOP → {cp_id}")
+            else:
+                messagebox.showerror("Error", f"CP '{cp_id}' no existe")
 
     def _cmd_resume_cp(self):
         cp_id = simpledialog.askstring("Reanudar CP", "ID del CP:")
-        if cp_id and cp_id in self.charging_points:
-            self._send_command(cp_id, 'RESUME')
-            messagebox.showinfo("OK", f"RESUME → {cp_id}")
+        if cp_id:
+            cp_id = cp_id.strip().upper()
+            if cp_id in self.charging_points:
+                self._send_command(cp_id, 'RESUME')
+                messagebox.showinfo("OK", f"RESUME → {cp_id}")
+            else:
+                messagebox.showerror("Error", f"CP '{cp_id}' no existe")
 
     def _cmd_stop_all(self):
         if messagebox.askyesno("Confirmar", "¿Parar TODOS los CPs?"):
@@ -1463,21 +1450,24 @@ class Central:
 
     def _cmd_revoke_key(self):
         cp_id = simpledialog.askstring("Revocar Clave", "ID del CP:")
-        if cp_id and cp_id in self.charging_points:
-            if messagebox.askyesno(
-                "Confirmar", f"¿Revocar clave de {cp_id}?\n\nEl CP deberá re-autenticarse."
-            ):
-                if self.revoke_cp_encryption_key(cp_id):
-                    messagebox.showinfo("Éxito", f"✅ Clave revocada: {cp_id}")
-                else:
-                    messagebox.showerror("Error", "❌ Error revocando clave")
-        else:
-            messagebox.showerror("Error", "❌ CP no encontrado")
+        if cp_id:
+            cp_id = cp_id.strip().upper()
+            if cp_id in self.charging_points:
+                if messagebox.askyesno(
+                    "Confirmar",
+                    f"¿Revocar clave de {cp_id}?\nEl CP deberá re-autenticarse."
+                ):
+                    if self.revoke_cp_encryption_key(cp_id):
+                        messagebox.showinfo("Éxito", f"✅ Clave revocada: {cp_id}")
+                    else:
+                        messagebox.showerror("Error", "❌ Error revocando clave")
+            else:
+                messagebox.showerror("Error", f"CP '{cp_id}' no existe")
 
     def _cmd_revoke_all_keys(self):
         if messagebox.askyesno(
             "⚠️ EMERGENCIA",
-            "¿REVOCAR TODAS LAS CLAVES?\n\nTodos los CPs quedarán fuera de servicio."
+            "¿REVOCAR TODAS LAS CLAVES?\nTodos los CPs quedarán fuera de servicio."
         ):
             count = self.revoke_all_encryption_keys()
             messagebox.showinfo("Completado", f"🔒 {count} claves revocadas")
@@ -1488,7 +1478,7 @@ class Central:
         lines = ["=" * 60, "ESTADO DE CLAVES DE CIFRADO", "=" * 60]
         for cp_id, cp_data in cps:
             auth = "🔐 Autenticado" if cp_data.get('authenticated') else "⚠️ No autenticado"
-            key = self.db.get_cp_encryption_key(cp_id)
+            key  = self.db.get_cp_encryption_key(cp_id)
             key_status = "✅ Presente" if key else "❌ Ausente"
             lines += [f"\n{cp_id}:", f"  Estado: {auth}", f"  Clave:  {key_status}"]
             if key:
@@ -1498,7 +1488,8 @@ class Central:
         dlg = tk.Toplevel(self.root)
         dlg.title("Estado de Claves")
         dlg.geometry("600x500")
-        tw = scrolledtext.ScrolledText(dlg, width=70, height=25, font=('Courier', 9))
+        tw = scrolledtext.ScrolledText(dlg, width=70, height=25,
+                                       font=('Courier', 9))
         tw.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         tw.insert(tk.END, "\n".join(lines))
         tw.config(state=tk.DISABLED)
@@ -1517,8 +1508,8 @@ class Central:
 
     def shutdown(self):
         self.running = False
-        self.audit.log_event('SYSTEM', '0.0.0.0', 'CENTRAL', 'System shutdown',
-                             'Central detenida', True)
+        self.audit.log_event('SYSTEM', '0.0.0.0', 'CENTRAL',
+                             'System shutdown', 'Central detenida', True)
         for resource in (self.server_socket, self.consumer, self.producer):
             try:
                 if resource:
@@ -1528,7 +1519,7 @@ class Central:
             except Exception:
                 pass
         self.db.close()
-        logger.info("✅ Central cerrada limpiamente")
+        logger.info("✅ Central cerrada")
 
 
 # ---------------------------------------------------------------------------
@@ -1536,18 +1527,19 @@ class Central:
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    socket_port = int(os.getenv('SOCKET_PORT', '5001'))
-    kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
-    db_path = os.getenv('DB_PATH', 'evcharging.db')
+    socket_port   = int(os.getenv('SOCKET_PORT',            5001))
+    kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS',    'kafka:9092')
+    db_path       = os.getenv('DB_PATH',                    'evcharging.db')
 
     central = Central(socket_port, kafka_servers, db_path)
 
-    def handle_sigterm(signum, frame):
-        logger.info("🛑 SIGTERM recibido, cerrando Central...")
+    # [C-9] Cierre limpio
+    def _handle_signal(signum, frame):
+        logger.info("🛑 Señal %d recibida — cerrando Central...", signum)
         central.shutdown()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    signal.signal(signal.SIGINT, handle_sigterm)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT,  _handle_signal)
 
     central.start()

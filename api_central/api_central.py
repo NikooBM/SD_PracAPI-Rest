@@ -1,33 +1,42 @@
 """
 API_CENTRAL - API REST para consultar estado del sistema EVCharging.
-Expone información de CPs, Drivers, Transacciones y recibe alertas climáticas.
+Expone CPs, sesiones, estadísticas y recibe alertas climáticas de EV_W.
 Release 2 - Práctica SD 25/26
 
-CORRECCIONES APLICADAS:
-  [1.5] Endpoint POST /api/v1/weather/alert protegido con X-API-Key
-  [2.2] api_central ya NO publica en central_commands; solo notifica en weather_sync
-  [2.3] Puerto por defecto corregido a 8082; CENTRAL_API_URL apunta a 8082
-  [5.4] Manejo de SIGTERM para cierre limpio
-  [5.6] Logs de alta frecuencia a nivel DEBUG
-  [5.7] Verificación Kafka sin publicar en test_topic
+CORRECCIONES COMPLETAS:
+  [A-1]  POST /api/v1/weather/alert protegido con X-API-Key (WEATHER_API_KEY).
+  [A-2]  api_central NO publica en central_commands; solo reenvía en weather_sync.
+         Es EV_Central quien decide si debe parar o reanudar un CP.
+  [A-3]  Puerto 8082 como valor por defecto coherente con docker-compose.
+  [A-4]  Cada request abre y cierra su propia conexión SQLite (evita
+         "database is locked" con WAL y múltiples readers).
+  [A-5]  DB sync thread eliminado (era innecesario y podía generar deadlocks).
+  [A-6]  Kafka Producer: reintentos exponenciales + manejo de NoBrokersAvailable.
+  [A-7]  Polling automático del front: setInterval en index.html. Aquí se añade
+         cabecera Cache-Control: no-store en /api/v1/system/status.
+  [A-8]  SIGTERM/SIGINT para cierre limpio.
+  [A-9]  Respuesta 503 clara cuando Kafka no está disponible.
+  [A-10] Verificación de Kafka con AdminClient sin publicar en topics basura.
 """
 import os
-import sqlite3
-import logging
-import json
 import sys
 import signal
-import threading
+import logging
+import json
 import time
+import threading
 from datetime import datetime
-from typing import Dict, List, Optional
 from functools import wraps
+from typing import Dict, List, Optional
+import sqlite3
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from kafka import KafkaProducer
 from kafka.admin import KafkaAdminClient
-from kafka.errors import KafkaError
+from kafka.errors import KafkaError, NoBrokersAvailable
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -35,74 +44,78 @@ from kafka.errors import KafkaError
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format='[%(asctime)s] %(levelname)s: %(message)s'
+    format='[%(asctime)s] %(levelname)s %(name)s: %(message)s'
 )
 logger = logging.getLogger('API-Central')
 
+# ---------------------------------------------------------------------------
+# Flask
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# FIX [1.5]: Autenticación Weather API Key
+# [A-1] Autenticación por API Key para endpoints weather (escritura)
 # ---------------------------------------------------------------------------
-WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
+WEATHER_API_KEY = os.getenv('WEATHER_API_KEY', '').strip()
 if not WEATHER_API_KEY:
     logger.warning(
         "⚠️  WEATHER_API_KEY no configurada. "
-        "El endpoint POST /api/v1/weather/alert estará deshabilitado."
+        "POST /api/v1/weather/alert estará deshabilitado."
     )
 
 
 def require_weather_api_key(f):
-    """Decorador: exige X-API-Key correcta para endpoints de escritura weather."""
+    """Decorador: exige cabecera X-API-Key == WEATHER_API_KEY."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not WEATHER_API_KEY:
-            return jsonify({'error': 'WEATHER_API_KEY no configurada en servidor'}), 500
+            return jsonify({'error': 'WEATHER_API_KEY no configurada en servidor'}), 503
         provided = request.headers.get('X-API-Key', '')
         if provided != WEATHER_API_KEY:
-            logger.warning(
-                f"Acceso no autorizado a weather alert desde {request.remote_addr}"
-            )
+            logger.warning("Acceso no autorizado a weather/alert desde %s", request.remote_addr)
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated
 
 
 # ---------------------------------------------------------------------------
-# CentralAPI
+# Clase principal
 # ---------------------------------------------------------------------------
 
 class CentralAPI:
-    """API para acceso al estado del sistema."""
+    """
+    Acceso de lectura a la BD compartida + reenvío de alertas weather a Kafka.
+    """
 
-    def __init__(self, db_path: str = 'evcharging.db',
-                 kafka_servers: str = 'localhost:9092'):
+    def __init__(self, db_path: str, kafka_servers: str):
         self.db_path = db_path
         self.kafka_servers = (
-            kafka_servers if isinstance(kafka_servers, list) else [kafka_servers]
+            kafka_servers if isinstance(kafka_servers, list)
+            else [s.strip() for s in kafka_servers.split(',')]
         )
 
-        # Alertas y localizaciones en memoria
-        self.weather_alerts: Dict[str, Dict] = {}
-        self.weather_locations: Dict[str, str] = {}
+        # Estado en memoria (alertas y localizaciones weather)
+        self.weather_alerts:    Dict[str, Dict] = {}
+        self.weather_locations: Dict[str, str]  = {}
+        self._mem_lock = threading.RLock()
 
         self.producer: Optional[KafkaProducer] = None
+        self._kafka_ready = False
         self._init_kafka()
-        self._start_db_sync()
 
     # ------------------------------------------------------------------
-    # FIX [5.7]: Kafka — verificar sin publicar en test_topic
+    # [A-10] Kafka — conexión con AdminClient para verificar sin basura
     # ------------------------------------------------------------------
 
     def _init_kafka(self):
-        """Inicializar Kafka Producer verificando conexión sin crear topics basura."""
+        """Conecta al broker Kafka con reintentos exponenciales."""
         for attempt in range(1, 11):
             try:
-                # FIX [5.7]: Verificar disponibilidad con admin client, sin publicar
                 admin = KafkaAdminClient(
                     bootstrap_servers=self.kafka_servers,
-                    request_timeout_ms=5000
+                    request_timeout_ms=5000,
+                    client_id='api_central_admin'
                 )
                 admin.list_topics()
                 admin.close()
@@ -110,268 +123,249 @@ class CentralAPI:
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_servers,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    retries=5
+                    retries=5,
+                    request_timeout_ms=30_000,
+                    max_block_ms=10_000,
+                    client_id='api_central_producer'
                 )
+                self._kafka_ready = True
                 logger.info("✅ Kafka Producer conectado")
                 return
-            except Exception as e:
-                logger.warning(f"⚠️ Kafka intento {attempt}/10: {e}")
-                if attempt < 10:
-                    time.sleep(5)
-        logger.error("❌ No se pudo conectar a Kafka tras 10 intentos")
+            except (KafkaError, NoBrokersAvailable, Exception) as exc:
+                wait = min(2 ** attempt, 30)
+                logger.warning("⚠️ Kafka intento %d/10 — %s — reintentando en %ds", attempt, exc, wait)
+                time.sleep(wait)
+        logger.error("❌ No se pudo conectar a Kafka. El reenvío de alertas estará deshabilitado.")
 
-    def _send_kafka(self, topic: str, payload: dict):
-        """
-        Enviar mensaje a Kafka.
-        FIX [4.5]: sin flush síncrono salvo mensajes críticos.
-        """
+    def _send_kafka(self, topic: str, payload: Dict):
+        """Envía a Kafka sin flush síncrono (fire-and-forget)."""
+        if not self._kafka_ready or not self.producer:
+            logger.warning("⚠️ Kafka no disponible; descartando mensaje en topic '%s'", topic)
+            return
         try:
-            if self.producer:
-                self.producer.send(topic, payload)
-        except Exception as e:
-            logger.error(f"❌ Error enviando a Kafka [{topic}]: {e}")
+            self.producer.send(topic, payload)
+        except Exception as exc:
+            logger.error("❌ Error enviando a Kafka [%s]: %s", topic, exc)
 
     # ------------------------------------------------------------------
-    # BD sync — keep-alive WAL
+    # [A-4] Conexiones SQLite por-request (lectura)
     # ------------------------------------------------------------------
 
-    def _start_db_sync(self):
-        """Thread que mantiene la conexión SQLite activa (WAL keep-alive)."""
-        def sync_loop():
-            while True:
-                try:
-                    time.sleep(2)
-                    conn = self._get_db()
-                    conn.commit()
-                    conn.close()
-                except Exception as e:
-                    logger.debug(f"DB sync: {e}")
-                    time.sleep(1)
-
-        t = threading.Thread(target=sync_loop, daemon=True)
-        t.start()
-        logger.debug("DB sync thread iniciado")
-
-    def _get_db(self):
-        conn = sqlite3.connect(self.db_path)
+    def _get_db(self) -> sqlite3.Connection:
+        """Abre una conexión SQLite de solo lectura (WAL friendly)."""
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.execute('PRAGMA journal_mode=WAL')
         conn.row_factory = sqlite3.Row
         return conn
 
     # ------------------------------------------------------------------
-    # Consultas (solo lectura de BD compartida)
+    # Consultas
     # ------------------------------------------------------------------
 
     def get_all_cps(self) -> List[Dict]:
         try:
             conn = self._get_db()
-            cursor = conn.cursor()
-            cursor.execute('''SELECT cp_id, location, price, status, last_seen,
-                              registered, authenticated
-                              FROM charging_points ORDER BY cp_id''')
-            cps = [dict(row) for row in cursor.fetchall()]
+            rows = conn.execute(
+                '''SELECT cp_id, location, price, status, last_seen,
+                          registered, authenticated
+                   FROM charging_points ORDER BY cp_id'''
+            ).fetchall()
             conn.close()
-            for cp in cps:
-                cp_id = cp['cp_id']
-                cp['weather_alert'] = self.weather_alerts.get(cp_id)
-                cp['weather_location'] = self.weather_locations.get(cp_id)
-            return cps
-        except Exception as e:
-            logger.exception(f"❌ Error obteniendo CPs: {e}")
+            result = []
+            with self._mem_lock:
+                for row in rows:
+                    cp = dict(row)
+                    cp_id = cp['cp_id']
+                    cp['weather_alert']    = self.weather_alerts.get(cp_id)
+                    cp['weather_location'] = self.weather_locations.get(cp_id)
+                    result.append(cp)
+            return result
+        except Exception as exc:
+            logger.exception("Error obteniendo CPs: %s", exc)
             return []
 
     def get_cp_by_id(self, cp_id: str) -> Optional[Dict]:
         try:
             conn = self._get_db()
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT cp_id, location, price, status, last_seen '
-                'FROM charging_points WHERE cp_id = ?', (cp_id,)
-            )
-            row = cursor.fetchone()
+            row = conn.execute(
+                '''SELECT cp_id, location, price, status, last_seen,
+                          registered, authenticated
+                   FROM charging_points WHERE cp_id = ?''',
+                (cp_id,)
+            ).fetchone()
             conn.close()
             if row:
                 cp = dict(row)
-                cp['weather_alert'] = self.weather_alerts.get(cp_id)
+                with self._mem_lock:
+                    cp['weather_alert']    = self.weather_alerts.get(cp_id)
+                    cp['weather_location'] = self.weather_locations.get(cp_id)
                 return cp
             return None
-        except Exception as e:
-            logger.exception(f"❌ Error obteniendo CP {cp_id}: {e}")
+        except Exception as exc:
+            logger.exception("Error obteniendo CP %s: %s", cp_id, exc)
             return None
 
     def get_active_sessions(self) -> List[Dict]:
         try:
             conn = self._get_db()
-            cursor = conn.cursor()
-            cursor.execute('''SELECT session_id, cp_id, driver_id, start_time,
-                              kw_consumed, total_cost
-                              FROM sessions
-                              WHERE end_time IS NULL
-                              ORDER BY start_time DESC''')
-            sessions = []
-            for row in cursor.fetchall():
+            rows = conn.execute(
+                '''SELECT session_id, cp_id, driver_id, start_time,
+                          kw_consumed, total_cost
+                   FROM sessions WHERE end_time IS NULL
+                   ORDER BY start_time DESC'''
+            ).fetchall()
+            conn.close()
+            result = []
+            for row in rows:
                 s = dict(row)
                 if s.get('start_time'):
                     s['start_time_formatted'] = datetime.fromtimestamp(
-                        s['start_time']).strftime('%Y-%m-%d %H:%M:%S')
-                s['kw_consumed'] = float(s.get('kw_consumed', 0))
-                s['total_cost'] = float(s.get('total_cost', 0))
-                sessions.append(s)
-            conn.close()
-            return sessions
-        except Exception as e:
-            logger.exception(f"❌ Error obteniendo sesiones activas: {e}")
+                        s['start_time']
+                    ).strftime('%Y-%m-%d %H:%M:%S')
+                s['kw_consumed'] = round(float(s.get('kw_consumed', 0)), 3)
+                s['total_cost']  = round(float(s.get('total_cost',  0)), 2)
+                result.append(s)
+            return result
+        except Exception as exc:
+            logger.exception("Error obteniendo sesiones activas: %s", exc)
             return []
 
     def get_session_history(self, limit: int = 50) -> List[Dict]:
         try:
+            limit = max(1, min(limit, 500))   # cota segura
             conn = self._get_db()
-            cursor = conn.cursor()
-            cursor.execute('''SELECT session_id, cp_id, driver_id,
-                              start_time, end_time, kw_consumed, total_cost,
-                              exitosa, razon
-                              FROM sessions
-                              WHERE end_time IS NOT NULL
-                              ORDER BY end_time DESC
-                              LIMIT ?''', (limit,))
-            sessions = []
-            for row in cursor.fetchall():
-                s = dict(row)
-                if s.get('start_time'):
-                    s['start_time_formatted'] = datetime.fromtimestamp(
-                        s['start_time']).strftime('%Y-%m-%d %H:%M:%S')
-                if s.get('end_time'):
-                    s['end_time_formatted'] = datetime.fromtimestamp(
-                        s['end_time']).strftime('%Y-%m-%d %H:%M:%S')
-                sessions.append(s)
+            rows = conn.execute(
+                '''SELECT session_id, cp_id, driver_id,
+                          start_time, end_time, kw_consumed, total_cost,
+                          exitosa, razon
+                   FROM sessions WHERE end_time IS NOT NULL
+                   ORDER BY end_time DESC LIMIT ?''',
+                (limit,)
+            ).fetchall()
             conn.close()
-            return sessions
-        except Exception as e:
-            logger.exception(f"❌ Error obteniendo historial: {e}")
+            result = []
+            for row in rows:
+                s = dict(row)
+                for field in ('start_time', 'end_time'):
+                    if s.get(field):
+                        s[f'{field}_formatted'] = datetime.fromtimestamp(
+                            s[field]
+                        ).strftime('%Y-%m-%d %H:%M:%S')
+                result.append(s)
+            return result
+        except Exception as exc:
+            logger.exception("Error obteniendo historial: %s", exc)
             return []
 
     def get_stats(self) -> Dict:
         try:
             conn = self._get_db()
-            cursor = conn.cursor()
+            total_cps = conn.execute('SELECT COUNT(*) FROM charging_points').fetchone()[0]
 
-            cursor.execute('SELECT COUNT(*) as total FROM charging_points')
-            total_cps = cursor.fetchone()['total']
+            by_status = {}
+            for row in conn.execute(
+                'SELECT status, COUNT(*) AS cnt FROM charging_points GROUP BY status'
+            ).fetchall():
+                by_status[row['status']] = row['cnt']
 
-            cursor.execute('SELECT status, COUNT(*) as count '
-                           'FROM charging_points GROUP BY status')
-            cps_by_status = {row['status']: row['count']
-                             for row in cursor.fetchall()}
+            active_sessions = conn.execute(
+                'SELECT COUNT(*) FROM sessions WHERE end_time IS NULL'
+            ).fetchone()[0]
 
-            cursor.execute('SELECT COUNT(*) as total FROM sessions WHERE end_time IS NULL')
-            active_sessions = cursor.fetchone()['total']
+            total_sessions = conn.execute(
+                'SELECT COUNT(*) FROM sessions WHERE end_time IS NOT NULL'
+            ).fetchone()[0]
 
-            cursor.execute('SELECT COUNT(*) as total FROM sessions WHERE end_time IS NOT NULL')
-            total_sessions = cursor.fetchone()['total']
+            row = conn.execute(
+                'SELECT SUM(kw_consumed) FROM sessions WHERE exitosa = 1'
+            ).fetchone()
+            total_energy = float(row[0] or 0)
 
-            cursor.execute('SELECT SUM(kw_consumed) as total FROM sessions WHERE exitosa=1')
-            row = cursor.fetchone()
-            total_energy = row['total'] if row['total'] else 0.0
-
-            cursor.execute('SELECT SUM(total_cost) as total FROM sessions WHERE exitosa=1')
-            row = cursor.fetchone()
-            total_revenue = row['total'] if row['total'] else 0.0
+            row = conn.execute(
+                'SELECT SUM(total_cost) FROM sessions WHERE exitosa = 1'
+            ).fetchone()
+            total_revenue = float(row[0] or 0)
 
             conn.close()
+            with self._mem_lock:
+                n_alerts = len(self.weather_alerts)
+
             return {
-                'total_cps': total_cps,
-                'cps_by_status': cps_by_status,
-                'active_sessions': active_sessions,
+                'total_cps':               total_cps,
+                'cps_by_status':           by_status,
+                'active_sessions':         active_sessions,
                 'total_sessions_completed': total_sessions,
-                'total_energy_kwh': round(total_energy, 2),
-                'total_revenue_eur': round(total_revenue, 2),
-                'weather_alerts': len(self.weather_alerts)
+                'total_energy_kwh':        round(total_energy,  2),
+                'total_revenue_eur':       round(total_revenue, 2),
+                'weather_alerts':          n_alerts
             }
-        except Exception as e:
-            logger.exception(f"❌ Error obteniendo stats: {e}")
+        except Exception as exc:
+            logger.exception("Error obteniendo stats: %s", exc)
             return {}
 
     def get_weather_alerts(self) -> List[Dict]:
-        return [{'cp_id': k, **v} for k, v in self.weather_alerts.items()]
+        with self._mem_lock:
+            return [{'cp_id': k, **v} for k, v in self.weather_alerts.items()]
+
+    def get_weather_info(self) -> Dict:
+        with self._mem_lock:
+            return {
+                'alerts':             self.get_weather_alerts(),
+                'monitored_locations': dict(self.weather_locations),
+                'total_monitored':    len(self.weather_locations),
+                'active_alerts':      len(self.weather_alerts)
+            }
 
     # ------------------------------------------------------------------
-    # FIX [2.2]: Procesamiento de alertas weather — SOLO notifica a Central
-    #            vía weather_sync. NO publica en central_commands.
+    # [A-2] Procesamiento de alertas weather — SIN publicar en central_commands
     # ------------------------------------------------------------------
 
     def process_weather_alert(self, cp_id: str, alert_type: str,
                                temperature: float, city: str) -> bool:
         """
-        Procesar alerta climática.
+        Actualiza estado interno y notifica a EV_Central vía weather_sync.
 
-        IMPORTANTE: api_central SOLO actualiza su estado interno y
-        publica en weather_sync para que ev_central tome las acciones.
-        NO publica en central_commands para evitar duplicación (fix 2.2).
+        IMPORTANTE: api_central NO publica en central_commands.
+        Es EV_Central quien, al consumir weather_sync, decide si STOP/RESUME.
         """
         try:
-            # Registrar localización siempre
-            if city and cp_id:
-                self.weather_locations[cp_id] = city
+            with self._mem_lock:
+                if city and cp_id:
+                    self.weather_locations[cp_id] = city
 
-            if alert_type == 'REGISTER':
-                # Solo registro de localización — notificar a ev_central
-                if self.producer:
-                    self._send_kafka('weather_sync', {
-                        'cp_id': cp_id,
-                        'alert_type': 'REGISTER',
+                if alert_type == 'REGISTER':
+                    logger.info("📍 Localización registrada: %s → %s", cp_id, city)
+
+                elif alert_type == 'START':
+                    self.weather_alerts[cp_id] = {
                         'temperature': temperature,
-                        'city': city
-                    })
-                logger.info(f"📍 Localización registrada: {cp_id} → {city}")
-                return True
+                        'city':        city,
+                        'started_at':  datetime.now().isoformat(),
+                        'active':      True
+                    }
+                    logger.warning("❄️  ALERTA INICIADA: %s (%s) — %.1f°C", cp_id, city, temperature)
 
-            if alert_type == 'START':
-                self.weather_alerts[cp_id] = {
-                    'temperature': temperature,
-                    'city': city,
-                    'started_at': datetime.now().isoformat(),
-                    'active': True
-                }
-                logger.warning(f"❄️ ALERTA INICIADA: {cp_id} ({city}) - {temperature}°C")
+                elif alert_type == 'END':
+                    self.weather_alerts.pop(cp_id, None)
+                    logger.info("☀️  ALERTA CANCELADA: %s (%s) — %.1f°C", cp_id, city, temperature)
 
-                # FIX [2.2]: Solo notificar a ev_central vía weather_sync.
-                # ev_central es quien publica en central_commands.
-                if self.producer:
-                    self._send_kafka('weather_sync', {
-                        'cp_id': cp_id,
-                        'alert_type': 'START',
-                        'temperature': temperature,
-                        'city': city
-                    })
+                else:
+                    logger.warning("⚠️ alert_type desconocido: '%s'", alert_type)
+                    return False
 
-            elif alert_type == 'END':
-                if cp_id in self.weather_alerts:
-                    self.weather_alerts[cp_id]['active'] = False
-                    self.weather_alerts[cp_id]['ended_at'] = datetime.now().isoformat()
-                    del self.weather_alerts[cp_id]
-
-                logger.info(f"☀️ ALERTA FINALIZADA: {cp_id} ({city}) - {temperature}°C")
-
-                if self.producer:
-                    self._send_kafka('weather_sync', {
-                        'cp_id': cp_id,
-                        'alert_type': 'END',
-                        'temperature': temperature,
-                        'city': city
-                    })
-
+            # Notificar a EV_Central únicamente mediante weather_sync
+            self._send_kafka('weather_sync', {
+                'cp_id':       cp_id,
+                'alert_type':  alert_type,
+                'temperature': temperature,
+                'city':        city,
+                'timestamp':   datetime.now().isoformat()
+            })
             return True
-        except Exception as e:
-            logger.exception(f"❌ Error procesando alerta: {e}")
-            return False
 
-    def get_weather_info(self) -> Dict:
-        return {
-            'alerts': self.get_weather_alerts(),
-            'monitored_locations': dict(self.weather_locations),
-            'total_monitored': len(self.weather_locations),
-            'active_alerts': len(self.weather_alerts)
-        }
+        except Exception as exc:
+            logger.exception("Error procesando alerta weather: %s", exc)
+            return False
 
     def shutdown(self):
         if self.producer:
@@ -391,13 +385,18 @@ api = CentralAPI(
     kafka_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
 )
 
+
 # ---------------------------------------------------------------------------
 # Endpoints REST
 # ---------------------------------------------------------------------------
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'service': 'API_Central'}), 200
+    return jsonify({
+        'status':       'healthy',
+        'service':      'API_Central',
+        'kafka_ready':  api._kafka_ready
+    }), 200
 
 
 @app.route('/api/v1/cps', methods=['GET'])
@@ -410,7 +409,7 @@ def get_cp(cp_id: str):
     cp = api.get_cp_by_id(cp_id)
     if cp:
         return jsonify(cp), 200
-    return jsonify({'error': 'CP not found'}), 404
+    return jsonify({'error': f"CP '{cp_id}' no encontrado"}), 404
 
 
 @app.route('/api/v1/sessions/active', methods=['GET'])
@@ -434,56 +433,62 @@ def get_weather_alerts():
     return jsonify(api.get_weather_alerts()), 200
 
 
-# FIX [1.5]: Endpoint protegido con X-API-Key
+@app.route('/api/v1/weather/info', methods=['GET'])
+def get_weather_info():
+    return jsonify(api.get_weather_info()), 200
+
+
+# [A-1] Protegido con X-API-Key
 @app.route('/api/v1/weather/alert', methods=['POST'])
 @require_weather_api_key
 def weather_alert():
     """
     POST /api/v1/weather/alert
-    Requiere cabecera: X-API-Key: <WEATHER_API_KEY>
+    Cabecera: X-API-Key: <WEATHER_API_KEY>
     Body: {cp_id, alert_type, temperature, city}
+    alert_type: 'REGISTER' | 'START' | 'END'
     """
+    data = request.get_json(silent=True)
+    required = ('cp_id', 'alert_type', 'temperature', 'city')
+    if not data or not all(f in data for f in required):
+        return jsonify({'error': f'Faltan campos: {required}'}), 400
+
     try:
-        data = request.get_json()
-        required = ['cp_id', 'alert_type', 'temperature', 'city']
-        if not data or not all(f in data for f in required):
-            return jsonify({'error': 'Missing required fields'}), 400
+        temperature = float(data['temperature'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'temperature debe ser un número'}), 400
 
-        success = api.process_weather_alert(
-            data['cp_id'], data['alert_type'],
-            data['temperature'], data['city']
-        )
-        if success:
-            return jsonify({'message': 'Alert processed successfully'}), 200
-        return jsonify({'error': 'Failed to process alert'}), 500
-    except Exception as e:
-        logger.exception(f"❌ Error en endpoint alert: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/v1/weather/info', methods=['GET'])
-def get_weather_info():
-    try:
-        return jsonify(api.get_weather_info()), 200
-    except Exception as e:
-        logger.exception(f"❌ Error: {e}")
-        return jsonify({'error': str(e)}), 500
+    success = api.process_weather_alert(
+        str(data['cp_id']),
+        str(data['alert_type']).upper(),
+        temperature,
+        str(data['city'])
+    )
+    if success:
+        return jsonify({'message': 'Alerta procesada correctamente'}), 200
+    return jsonify({'error': 'Error procesando alerta'}), 500
 
 
 @app.route('/api/v1/system/status', methods=['GET'])
 def get_system_status():
-    """GET /api/v1/system/status — estado completo (para el Front)."""
+    """
+    Endpoint principal para el Front — devuelve el estado completo del sistema.
+    [A-7] Cache-Control: no-store para que el navegador siempre pida datos frescos.
+    """
     try:
-        return jsonify({
-            'cps': api.get_all_cps(),
+        payload = {
+            'cps':             api.get_all_cps(),
             'active_sessions': api.get_active_sessions(),
-            'stats': api.get_stats(),
-            'weather_alerts': api.get_weather_alerts(),
-            'timestamp': datetime.now().isoformat()
-        }), 200
-    except Exception as e:
-        logger.exception(f"❌ Error obteniendo estado: {e}")
-        return jsonify({'error': str(e)}), 500
+            'stats':           api.get_stats(),
+            'weather_alerts':  api.get_weather_alerts(),
+            'timestamp':       datetime.now().isoformat()
+        }
+        resp = make_response(jsonify(payload), 200)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    except Exception as exc:
+        logger.exception("Error en /api/v1/system/status: %s", exc)
+        return jsonify({'error': str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -492,22 +497,21 @@ def get_system_status():
 
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("API_CENTRAL - API REST para EVCharging")
-    logger.info("Release 2 - Práctica SD 25/26")
+    logger.info("API_CENTRAL — Release 2 — Práctica SD 25/26")
     logger.info("=" * 60)
 
-    # FIX [5.4]: Manejo de SIGTERM
-    def handle_sigterm(signum, frame):
-        logger.info("🛑 SIGTERM recibido, cerrando API_Central...")
+    # [A-8] Cierre limpio con SIGTERM / SIGINT
+    def _handle_signal(signum, frame):
+        logger.info("🛑 Señal %d recibida — cerrando API_Central...", signum)
         api.shutdown()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    signal.signal(signal.SIGINT, handle_sigterm)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT,  _handle_signal)
 
-    # FIX [2.3]: Puerto por defecto 8082
+    # [A-3] Puerto 8082 por defecto
     port = int(os.getenv('API_PORT', 8082))
-    logger.info(f"🚀 API escuchando en http://0.0.0.0:{port}")
+    logger.info("🚀 API_Central escuchando en http://0.0.0.0:%d", port)
     logger.info("=" * 60)
 
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
