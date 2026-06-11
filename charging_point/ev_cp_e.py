@@ -1,21 +1,12 @@
-"""
-EV_CP_E - Engine del Charging Point
+"""EV_CP_E — Engine del Charging Point
 Release 2 - Práctica SD 25/26
-
-CORRECCIONES APLICADAS:
-  [2.5] Backup de sesión con escritura atómica (JSON + tempfile + os.replace)
-  [4.3] Engine espera indefinidamente la encryption_key (sin timeout de 45s)
-  [4.4] Consumer Kafka con reinicio automático en fallos
-  [4.5] flush() solo en mensajes críticos
-  [5.1] Persistencia migrada de pickle a JSON
-  [5.4] Manejo de SIGTERM para cierre limpio
-  [5.6] Logs de alta frecuencia a nivel DEBUG
 """
 import socket
 import threading
 import json
 import time
 import os
+import stat
 import logging
 import random
 import tempfile
@@ -25,7 +16,6 @@ from typing import Optional, Dict, Any
 from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
 
-# Añadir path para security
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 try:
@@ -33,14 +23,13 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
-    logging.warning("⚠️ CryptoManager no disponible")
+    logging.warning("⚠️ CryptoManager no disponible — mensajes sin cifrar")
 
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='[%(asctime)s] %(levelname)s: %(message)s'
 )
-
 
 class ChargingPointEngine:
     def __init__(self, cp_id: str, listen_port: int,
@@ -56,16 +45,16 @@ class ChargingPointEngine:
         self.is_healthy = True
         self.is_stopped_by_central = False
         self.current_session: Optional[Dict[str, Any]] = None
-        self.last_central_contact = 0
+        self.last_central_contact = 0.0
 
         self.producer: Optional[KafkaProducer] = None
         self.consumer: Optional[KafkaConsumer] = None
         self.health_server: Optional[socket.socket] = None
         self.running = True
         self.charging_active = False
-
-        # FIX [5.1]: backup en JSON en lugar de pickle; en directorio de datos
         self.data_dir = os.getenv('CP_DATA_DIR', '/tmp')
+        os.makedirs(self.data_dir, mode=0o700, exist_ok=True)
+        self.key_file = os.path.join(self.data_dir, f'{cp_id}_encryption_key.txt')
         self.session_backup_file = os.path.join(self.data_dir, f'cp_{cp_id}_session.json')
 
         self.logger = logging.getLogger(f"Engine-{cp_id}")
@@ -74,102 +63,92 @@ class ChargingPointEngine:
         self.encryption_key: Optional[str] = None
         self.encryption_key_loaded = threading.Event()
 
-        # Archivo donde el Monitor escribe la key (compartido con Monitor)
-        self.key_file = f'/tmp/{self.cp_id}_encryption_key.txt'
-
     # ------------------------------------------------------------------
-    # FIX [4.3]: Espera indefinida de la encryption_key
     # ------------------------------------------------------------------
 
     def _load_encryption_key(self):
+        """Espera indefinidamente hasta que Monitor escriba la key en CP_DATA_DIR.
+        Sin timeout: el Monitor puede tardar mientras negocia con el Registry.
         """
-        Esperar indefinidamente la encryption_key del Monitor.
-        Sin la clave no es posible descifrar las autorizaciones de servicio.
-        """
-        self.logger.info("⏳ Esperando encryption key del Monitor...")
+        self.logger.info("⏳ Esperando encryption key en %s ...", self.key_file)
         attempt = 0
 
         while self.running:
             attempt += 1
             if os.path.exists(self.key_file):
                 try:
-                    with open(self.key_file, 'r') as f:
+                    with open(self.key_file, 'r', encoding='utf-8') as f:
                         key = f.read().strip()
                     if key:
                         self.encryption_key = key
                         self.logger.info(
-                            f"🔑 Encryption key cargada (intento {attempt}): {key[:20]}..."
+                            "🔑 Encryption key cargada (intento %d): %.20s...", attempt, key
                         )
                         self.encryption_key_loaded.set()
                         return True
                 except Exception as e:
-                    self.logger.error(f"❌ Error leyendo key: {e}")
+                    self.logger.error("❌ Error leyendo key: %s", e)
 
-            # Log periódico cada 30s para no saturar
             if attempt % 30 == 0:
-                self.logger.warning(f"⏳ Esperando encryption key... ({attempt}s)")
+                self.logger.warning("⏳ Esperando encryption key... (%ds)", attempt)
 
             time.sleep(1)
 
-        # Sólo llega aquí si running=False
         self.encryption_key_loaded.set()
         return False
 
     # ------------------------------------------------------------------
-    # FIX [5.1]: Backup de sesión en JSON con escritura atómica
     # ------------------------------------------------------------------
 
+    def _get_session_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Obtiene copia del estado de sesión bajo lock, para guardar fuera del lock."""
+        with self.lock:
+            if not self.current_session:
+                return None
+            return {
+                'session_id':   self.current_session.get('session_id'),
+                'driver_id':    self.current_session.get('driver_id'),
+                'price':        self.current_session.get('price'),
+                'start_time':   self.current_session.get('start_time'),
+                'kw_consumed':  self.current_session.get('kw_consumed', 0.0),
+                'total_cost':   self.current_session.get('total_cost', 0.0),
+                'manual':       self.current_session.get('manual', False),
+            }
+
     def _save_session_backup(self):
-        """FIX [2.5] + [5.1]: Escritura atómica en JSON (no pickle)."""
-        if not self.current_session:
+        """Escritura atómica en JSON — NUNCA llamar mientras se tiene self.lock."""
+        snapshot = self._get_session_snapshot()
+        if not snapshot:
             return
         try:
-            data = {
-                'session_id': self.current_session.get('session_id'),
-                'driver_id': self.current_session.get('driver_id'),
-                'price': self.current_session.get('price'),
-                'start_time': self.current_session.get('start_time'),
-                'kw_consumed': self.current_session.get('kw_consumed', 0.0),
-                'total_cost': self.current_session.get('total_cost', 0.0),
-                'manual': self.current_session.get('manual', False),
-            }
-            dir_name = os.path.dirname(self.session_backup_file) or '.'
-            # FIX [2.5]: escritura en temporal + rename atómico
+            dir_name = os.path.dirname(os.path.abspath(self.session_backup_file))
             with tempfile.NamedTemporaryFile(
                 'w', dir=dir_name, delete=False, suffix='.tmp', encoding='utf-8'
             ) as tmp:
-                json.dump(data, tmp)
+                json.dump(snapshot, tmp, ensure_ascii=False)
                 tmp_path = tmp.name
             os.replace(tmp_path, self.session_backup_file)
         except Exception as e:
-            self.logger.error(f"❌ Error guardando backup: {e}")
+            self.logger.error("❌ Error guardando backup: %s", e)
 
     def _load_session_backup(self) -> Optional[Dict[str, Any]]:
-        """FIX [5.1]: Cargar backup JSON. Compatibilidad con .pkl legados."""
-        # Intentar JSON primero
+        """Carga backup JSON. Compatibilidad con .pkl legados."""
         if os.path.exists(self.session_backup_file):
             try:
                 with open(self.session_backup_file, 'r', encoding='utf-8') as f:
                     backup = json.load(f)
                 backup['exitosa'] = False
-                backup['razon'] = 'Engine cayó durante carga'
-                self.logger.info("=" * 60)
-                self.logger.info("📂 SESIÓN JSON RECUPERADA")
-                self.logger.info(f"   Sesión: {backup.get('session_id')}")
-                self.logger.info(f"   Driver: {backup.get('driver_id')}")
-                self.logger.info(f"   Consumo: {backup.get('kw_consumed', 0):.2f} kWh")
-                self.logger.info(f"   Coste:   {backup.get('total_cost', 0):.2f} €")
-                self.logger.info("=" * 60)
+                backup['razon'] = 'Engine reiniciado durante carga'
+                self.logger.info("📂 SESIÓN RECUPERADA: %s", backup.get('session_id'))
                 return backup
             except Exception as e:
-                self.logger.error(f"❌ Error cargando backup JSON: {e}")
-                # Borrar backup corrupto
+                self.logger.error("❌ Error cargando backup JSON: %s", e)
                 try:
                     os.remove(self.session_backup_file)
                 except Exception:
                     pass
 
-        # Compatibilidad: intentar .pkl si existe
+        # Compatibilidad .pkl
         pkl_file = self.session_backup_file.replace('.json', '.pkl')
         if os.path.exists(pkl_file):
             try:
@@ -177,35 +156,19 @@ class ChargingPointEngine:
                 with open(pkl_file, 'rb') as f:
                     backup = pickle.load(f)
                 backup['exitosa'] = False
-                backup['razon'] = 'Engine cayó durante carga'
-                self.logger.info("📂 SESIÓN pkl RECUPERADA (migrando a JSON)")
-                self._save_session_backup_from(backup)  # Migrar a JSON
+                backup['razon'] = 'Engine reiniciado durante carga'
+                self.logger.info("📂 Sesión pkl recuperada (migrando a JSON)")
                 os.remove(pkl_file)
                 return backup
             except Exception as e:
-                self.logger.error(f"❌ Error cargando backup pkl: {e}")
+                self.logger.error("❌ Error cargando backup pkl: %s", e)
                 try:
                     os.remove(pkl_file)
                 except Exception:
                     pass
-
         return None
 
-    def _save_session_backup_from(self, session: Dict):
-        """Guardar datos de sesión directamente (para migración pkl→json)."""
-        try:
-            dir_name = os.path.dirname(self.session_backup_file) or '.'
-            with tempfile.NamedTemporaryFile(
-                'w', dir=dir_name, delete=False, suffix='.tmp', encoding='utf-8'
-            ) as tmp:
-                json.dump(session, tmp)
-                tmp_path = tmp.name
-            os.replace(tmp_path, self.session_backup_file)
-        except Exception as e:
-            self.logger.error(f"❌ Error en save_from: {e}")
-
     def _delete_session_backup(self):
-        """Eliminar archivos de backup."""
         for f in [self.session_backup_file,
                   self.session_backup_file.replace('.json', '.pkl')]:
             try:
@@ -220,52 +183,46 @@ class ChargingPointEngine:
 
     def start(self) -> bool:
         self.logger.info("=" * 60)
-        self.logger.info(f"ENGINE {self.cp_id}")
+        self.logger.info("ENGINE %s", self.cp_id)
         self.logger.info("=" * 60)
 
-        recovered_session = self._load_session_backup()
+        recovered = self._load_session_backup()
 
         if not self._init_health_server():
             return False
-
         if not self._init_kafka():
             return False
-
-        # FIX [4.3]: cargar key en hilo paralelo — sin timeout
         threading.Thread(target=self._load_encryption_key, daemon=True).start()
 
-        if recovered_session:
+        if recovered:
             threading.Thread(
                 target=self._send_recovered_session_when_ready,
-                args=(recovered_session,), daemon=True
+                args=(recovered,), daemon=True
             ).start()
 
-        self.logger.info(f"✅ Engine {self.cp_id} listo")
+        self.logger.info("✅ Engine %s listo", self.cp_id)
         self._interactive_mode()
         return True
 
     def _send_recovered_session_when_ready(self, session: Dict[str, Any]):
-        """Enviar sesión recuperada cuando la key esté disponible."""
         time.sleep(3)
-        # Esperar key sin timeout (puede tardar si el Monitor reinicia)
         self.encryption_key_loaded.wait()
-
         try:
             payload = {
-                'cp_id': self.cp_id,
+                'cp_id':      self.cp_id,
                 'session_id': session.get('session_id'),
-                'driver_id': session.get('driver_id'),
-                'kw_total': session.get('kw_consumed', 0),
+                'driver_id':  session.get('driver_id'),
+                'kw_total':   session.get('kw_consumed', 0),
                 'cost_total': session.get('total_cost', 0),
-                'exitosa': False,
-                'razon': session.get('razon', 'Engine cayó durante carga'),
-                'timestamp': time.time()
+                'exitosa':    False,
+                'razon':      session.get('razon', 'Engine reiniciado'),
+                'timestamp':  time.time()
             }
             self._send_kafka('charging_complete', payload, encrypt=True, require_ack=True)
             self.logger.info("✅ Sesión recuperada enviada a Central")
             self._delete_session_backup()
         except Exception as e:
-            self.logger.error(f"❌ Error enviando sesión recuperada: {e}")
+            self.logger.error("❌ Error enviando sesión recuperada: %s", e)
 
     # ------------------------------------------------------------------
     # Health server
@@ -279,16 +236,16 @@ class ChargingPointEngine:
             self.health_server.listen(5)
             self.health_server.settimeout(1.0)
             threading.Thread(target=self._health_server_loop, daemon=True).start()
-            self.logger.info(f"✅ Health server: {self.listen_port}")
+            self.logger.info("✅ Health server: :%d", self.listen_port)
             return True
         except Exception as e:
-            self.logger.error(f"❌ Health server error: {e}")
+            self.logger.error("❌ Health server: %s", e)
             return False
 
     def _health_server_loop(self):
         while self.running:
             try:
-                client, addr = self.health_server.accept()
+                client, _ = self.health_server.accept()
                 client.settimeout(2.0)
                 try:
                     data = client.recv(64).decode('utf-8').strip()
@@ -299,23 +256,21 @@ class ChargingPointEngine:
             except socket.timeout:
                 continue
             except Exception:
-                if self.running:
-                    pass  # Evitar spam de logs
+                pass
 
     # ------------------------------------------------------------------
-    # FIX [4.4]: Kafka con reinicio automático del consumer
     # ------------------------------------------------------------------
 
     def _init_kafka(self) -> bool:
         for attempt in range(1, 16):
             try:
-                self.logger.info(f"🔄 Kafka ({attempt}/15)...")
+                self.logger.info("🔄 Kafka (%d/15)...", attempt)
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_servers,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                     retries=5,
-                    request_timeout_ms=30000,
-                    max_block_ms=10000
+                    request_timeout_ms=30_000,
+                    max_block_ms=10_000
                 )
                 self._init_consumer()
                 if self.consumer:
@@ -325,13 +280,12 @@ class ChargingPointEngine:
                     self.logger.info("✅ Kafka conectado")
                     return True
             except Exception as e:
-                self.logger.error(f"❌ Kafka error: {e}")
+                self.logger.error("❌ Kafka error: %s", e)
                 if attempt < 15:
                     time.sleep(5)
         return False
 
     def _init_consumer(self):
-        """Crear/recrear consumer Kafka."""
         try:
             self.consumer = KafkaConsumer(
                 'service_authorizations', 'central_commands',
@@ -340,22 +294,21 @@ class ChargingPointEngine:
                 auto_offset_reset='latest',
                 group_id=f'cp-{self.cp_id}',
                 enable_auto_commit=True,
-                session_timeout_ms=30000,
+                session_timeout_ms=30_000,
                 consumer_timeout_ms=1000
             )
         except Exception as e:
-            self.logger.error(f"❌ No se pudo crear consumer: {e}")
+            self.logger.error("❌ No se pudo crear consumer: %s", e)
             self.consumer = None
 
     def _kafka_consumer_loop(self):
-        """FIX [4.4]: Loop consumer con reinicio automático ante fallos."""
+        """Loop con reinicio automático."""
         while self.running:
             try:
                 if self.consumer is None:
                     self._init_consumer()
                     time.sleep(2)
                     continue
-
                 for msg in self.consumer:
                     if not self.running:
                         break
@@ -369,12 +322,18 @@ class ChargingPointEngine:
                                 data = CryptoManager.decrypt_json(
                                     data['data'], self.encryption_key
                                 )
-                            except Exception as e:
-                                self.logger.error(f"❌ Error descifrando: {e}")
+                            except ValueError as e:
+                                self.logger.error(
+                                    "❌ Error descifrando (clave incorrecta o datos corruptos): %s", e
+                                )
+                                self.logger.error(
+                                    "   Imposible descifrar mensaje de Central. "
+                                    "Verifique que la clave sea correcta."
+                                )
                                 continue
                         else:
                             self.logger.warning(
-                                "⚠️ Mensaje cifrado recibido pero sin key disponible; ignorando"
+                                "⚠️ Mensaje cifrado sin key disponible; ignorando"
                             )
                             continue
 
@@ -385,7 +344,7 @@ class ChargingPointEngine:
 
             except Exception as e:
                 if self.running and 'timed out' not in str(e).lower():
-                    self.logger.error(f"❌ Consumer error, reiniciando: {e}")
+                    self.logger.error("❌ Consumer error, reiniciando: %s", e)
                     try:
                         if self.consumer:
                             self.consumer.close()
@@ -405,45 +364,38 @@ class ChargingPointEngine:
 
         with self.lock:
             if self.is_stopped_by_central:
-                self.logger.warning("⚠️ CP parado por Central; autorización ignorada")
+                self.logger.warning("⚠️ CP parado; autorización ignorada")
                 return
-            if self.current_session is not None:
+            if self.current_session:
                 self.logger.warning("⚠️ Ya hay sesión activa; autorización ignorada")
                 return
-
-        driver_id = data.get('driver_id', '')
-        session_id = data.get('session_id', '')
-        price = data.get('price', self.price_per_kwh)
-
-        self.logger.info(f"✅ AUTORIZACIÓN: {driver_id}")
-        with self.lock:
+            driver_id  = data.get('driver_id', '')
+            session_id = data.get('session_id', '')
+            price      = data.get('price', self.price_per_kwh)
             self.state = 'AUTHORIZED'
             self.current_session = {
                 'session_id': session_id,
-                'driver_id': driver_id,
-                'price': price,
+                'driver_id':  driver_id,
+                'price':      price,
                 'start_time': None,
                 'kw_consumed': 0.0,
-                'total_cost': 0.0
+                'total_cost':  0.0
             }
 
         print("\n" + "=" * 60)
         print("⚡ SERVICIO AUTORIZADO")
-        print("=" * 60)
-        print(f"Driver:  {driver_id}")
-        print(f"Sesión:  {session_id}")
+        print(f"Driver:  {data.get('driver_id')}")
+        print(f"Sesión:  {data.get('session_id')}")
         print("\n👉 Pulsa '1' para iniciar carga")
         print("=" * 60 + "\n")
 
     def iniciar_carga(self) -> bool:
         with self.lock:
             if self.state != 'AUTHORIZED':
-                print(f"\n❌ Estado: {self.state}. Necesitas autorización.\n")
+                print(f"\n❌ Estado: {self.state}. Necesitas autorización primero.\n")
                 return False
-            if self.current_session is None:
-                return False
-            if self.is_stopped_by_central:
-                print("\n❌ CP parado por Central\n")
+            if not self.current_session or self.is_stopped_by_central:
+                print("\n❌ CP parado por Central o sin sesión.\n")
                 return False
             self.state = 'CHARGING'
             self.current_session['start_time'] = time.time()
@@ -456,14 +408,11 @@ class ChargingPointEngine:
         return True
 
     def iniciar_carga_manual(self) -> bool:
-        """Carga manual (emergencia) — sin autorización de Central."""
         if time.time() - self.last_central_contact > 30:
             print("\n⚠️ Central no responde hace más de 30s")
             print("   Iniciando en modo emergencia...")
         else:
-            print(f"\n⚠️ Central activa (último contacto: "
-                  f"{int(time.time() - self.last_central_contact)}s)")
-            resp = input("   ¿Continuar con carga manual de emergencia? (s/n): ").lower()
+            resp = input("¿Continuar con carga manual de emergencia? (s/n): ").lower()
             if resp != 's':
                 return False
 
@@ -473,143 +422,123 @@ class ChargingPointEngine:
             return False
 
         with self.lock:
-            if self.current_session:
-                print("❌ Ya hay una sesión activa")
+            if self.current_session or self.is_stopped_by_central:
+                print("❌ Hay sesión activa o CP parado")
                 return False
-            if self.is_stopped_by_central:
-                print("❌ CP parado por Central — No se puede iniciar carga manual")
-                return False
-
             session_id = f"MANUAL_{self.cp_id}_{int(time.time())}_{os.getpid()}"
             self.state = 'CHARGING'
             self.current_session = {
-                'session_id': session_id,
-                'driver_id': driver_id,
-                'price': self.price_per_kwh,
-                'start_time': time.time(),
-                'kw_consumed': 0.0,
-                'total_cost': 0.0,
-                'manual': True
+                'session_id': session_id, 'driver_id': driver_id,
+                'price': self.price_per_kwh, 'start_time': time.time(),
+                'kw_consumed': 0.0, 'total_cost': 0.0, 'manual': True
             }
             self.charging_active = True
 
-        print("\n" + "=" * 60)
-        print("⚡ CARGA MANUAL INICIADA (MODO EMERGENCIA)")
-        print("=" * 60)
-        print(f"Driver:  {driver_id}")
-        print(f"Sesión:  {session_id}")
-        print("\n💡 Esta sesión NO está autorizada por Central")
-        print("💡 Pulsa '2' para finalizar")
-        print("=" * 60 + "\n")
-
+        print("\n⚡ CARGA MANUAL INICIADA")
+        print(f"Driver: {driver_id} | Sesión: {session_id}")
+        print("👉 Pulsa '2' para finalizar\n")
         threading.Thread(target=self._charging_loop, daemon=True).start()
         return True
 
     def _charging_loop(self):
-        """Loop de carga. FIX [4.5]: flush solo en envíos críticos."""
-        last_log_time = 0
-        last_send_time = 0
+        """File I/O fuera del lock. flush() solo en envíos críticos."""
+        last_send_time = 0.0
+        last_log_time  = 0.0
 
         while self.charging_active and self.running:
+            # Obtener snapshot bajo lock, luego trabajar fuera
+            snapshot = None
+            stopped = False
+
             with self.lock:
-                if self.current_session is None:
+                if not self.current_session:
                     break
                 if self.is_stopped_by_central:
-                    self.logger.warning("⛔ Carga detenida por Central")
-                    break
-
-                kw_rate = random.uniform(7.0, 22.0) / 3600
-                self.current_session['kw_consumed'] += kw_rate
-                self.current_session['total_cost'] = (
-                    self.current_session['kw_consumed'] * self.current_session['price']
-                )
-
-                self._save_session_backup()
-
-                current_time = time.time()
-                if current_time - last_send_time >= 2:
-                    payload = {
-                        'cp_id': self.cp_id,
-                        'session_id': self.current_session['session_id'],
-                        'driver_id': self.current_session['driver_id'],
-                        'kw': self.current_session['kw_consumed'],
-                        'cost': self.current_session['total_cost'],
-                        'manual': self.current_session.get('manual', False),
-                        'timestamp': current_time
-                    }
-                    # FIX [4.5]: sin require_ack en datos de telemetría
-                    self._send_kafka('charging_data', payload, encrypt=True)
-                    last_send_time = current_time
-
-                # FIX [5.6]: log de datos de carga a DEBUG
-                if current_time - last_log_time >= 5:
-                    elapsed = int(current_time - (self.current_session['start_time'] or current_time))
-                    icon = "🔧" if self.current_session.get('manual') else "⚡"
-                    self.logger.debug(
-                        f"{icon} {self.current_session['kw_consumed']:.2f} kWh | "
-                        f"{self.current_session['total_cost']:.2f} € | {elapsed}s"
+                    stopped = True
+                else:
+                    kw_rate = random.uniform(7.0, 22.0) / 3600
+                    self.current_session['kw_consumed'] += kw_rate
+                    self.current_session['total_cost'] = (
+                        self.current_session['kw_consumed'] * self.current_session['price']
                     )
-                    last_log_time = current_time
+                    snapshot = dict(self.current_session)
+
+            if stopped:
+                self.logger.warning("⛔ Carga detenida por Central")
+                break
+
+            if snapshot is None:
+                break
+            self._save_session_backup()
+
+            current_time = time.time()
+            if current_time - last_send_time >= 2:
+                self._send_kafka('charging_data', {
+                    'cp_id':      self.cp_id,
+                    'session_id': snapshot['session_id'],
+                    'driver_id':  snapshot['driver_id'],
+                    'kw':         snapshot['kw_consumed'],
+                    'cost':       snapshot['total_cost'],
+                    'manual':     snapshot.get('manual', False),
+                    'timestamp':  current_time
+                }, encrypt=True, require_ack=False)
+                last_send_time = current_time
+            if current_time - last_log_time >= 5:
+                elapsed = int(current_time - (snapshot.get('start_time') or current_time))
+                self.logger.debug(
+                    "⚡ %.2f kWh | %.2f € | %ds",
+                    snapshot['kw_consumed'], snapshot['total_cost'], elapsed
+                )
+                last_log_time = current_time
 
             time.sleep(1)
 
     def finalizar_carga(self, razon: str = 'Finalizada por conductor') -> bool:
         with self.lock:
-            if self.state != 'CHARGING':
+            if self.state != 'CHARGING' or not self.current_session:
                 print(f"\n❌ Estado: {self.state}\n")
-                return False
-            if self.current_session is None:
                 return False
             self.charging_active = False
 
         time.sleep(0.5)
 
         with self.lock:
-            if self.current_session is None:
+            if not self.current_session:
                 return False
             session_id = self.current_session['session_id']
-            driver_id = self.current_session['driver_id']
-            kw_total = self.current_session['kw_consumed']
+            driver_id  = self.current_session['driver_id']
+            kw_total   = self.current_session['kw_consumed']
             cost_total = self.current_session['total_cost']
-            is_manual = self.current_session.get('manual', False)
+            is_manual  = self.current_session.get('manual', False)
             self.state = 'IDLE'
             self.current_session = None
 
         self._print_ticket(session_id, driver_id, kw_total, cost_total, True, razon, is_manual)
         self._delete_session_backup()
-
-        payload = {
-            'cp_id': self.cp_id,
+        self._send_kafka('charging_complete', {
+            'cp_id':      self.cp_id,
             'session_id': session_id,
-            'driver_id': driver_id,
-            'kw_total': kw_total,
+            'driver_id':  driver_id,
+            'kw_total':   kw_total,
             'cost_total': cost_total,
-            'exitosa': True,
-            'razon': razon,
-            'manual': is_manual,
-            'timestamp': time.time()
-        }
-        # FIX [4.5]: charging_complete es crítico → require_ack=True
-        self._send_kafka('charging_complete', payload, encrypt=True, require_ack=True)
-        self.logger.info(f"✅ Finalizada: {session_id}")
+            'exitosa':    True,
+            'razon':      razon,
+            'manual':     is_manual,
+            'timestamp':  time.time()
+        }, encrypt=True, require_ack=True)
+
+        self.logger.info("✅ Carga finalizada: %s", session_id)
         return True
 
-    def _print_ticket(self, session_id: str, driver_id: str, kw: float,
-                      cost: float, exitosa: bool, razon: str = '',
-                      is_manual: bool = False):
+    def _print_ticket(self, session_id, driver_id, kw, cost, exitosa, razon='', manual=False):
         print("\n" + "=" * 60)
-        print(f"🎫 TICKET - {self.cp_id}")
-        if is_manual:
-            print("    ⚠️ MODO MANUAL")
+        print(f"🎫 TICKET — {self.cp_id}{'  ⚠️ MANUAL' if manual else ''}")
         print("=" * 60)
-        print(f"Conductor:      {driver_id}")
-        print(f"Sesión:         {session_id}")
-        print(f"Energía:        {kw:.2f} kWh")
-        print(f"Importe:        {cost:.2f} €")
-        if exitosa:
-            print("Estado:         ✅ COMPLETADA")
-        else:
-            print(f"Estado:         ⚠️ INTERRUMPIDA - {razon}")
+        print(f"Conductor: {driver_id}")
+        print(f"Sesión:    {session_id}")
+        print(f"Energía:   {kw:.2f} kWh")
+        print(f"Importe:   {cost:.2f} €")
+        print(f"Estado:    {'✅ COMPLETADA' if exitosa else '⚠️ INTERRUMPIDA — ' + razon}")
         print("=" * 60 + "\n")
 
     def _handle_command(self, data: Dict[str, Any]):
@@ -617,8 +546,7 @@ class ChargingPointEngine:
             return
         self.last_central_contact = time.time()
         command = data.get('command', '')
-        self.logger.info(f"📨 Comando: {command}")
-
+        self.logger.info("📨 Comando: %s", command)
         if command == 'STOP':
             self._stop_by_central()
         elif command == 'RESUME':
@@ -629,38 +557,38 @@ class ChargingPointEngine:
         print("⛔ CP DETENIDO POR CENTRAL")
         print("=" * 60 + "\n")
 
+        session_to_finalize = None
         with self.lock:
             self.is_stopped_by_central = True
             if self.state == 'CHARGING' and self.current_session:
                 self.charging_active = False
-                time.sleep(0.5)
-                session_id = self.current_session['session_id']
-                driver_id = self.current_session['driver_id']
-                kw_total = self.current_session['kw_consumed']
-                cost_total = self.current_session['total_cost']
-                self._print_ticket(
-                    session_id, driver_id, kw_total, cost_total,
-                    False, 'Detenido por Central'
-                )
-                payload = {
-                    'cp_id': self.cp_id,
-                    'session_id': session_id,
-                    'driver_id': driver_id,
-                    'kw_total': kw_total,
-                    'cost_total': cost_total,
-                    'exitosa': False,
-                    'razon': 'Detenido por Central',
-                    'timestamp': time.time()
-                }
-                # Fuera del lock para no bloquear
-                threading.Thread(
-                    target=lambda: self._send_kafka(
-                        'charging_complete', payload, encrypt=True, require_ack=True
-                    ), daemon=True
-                ).start()
+                session_to_finalize = dict(self.current_session)
                 self.current_session = None
-                self._delete_session_backup()
             self.state = 'STOPPED'
+
+        if session_to_finalize:
+            time.sleep(0.5)
+            self._print_ticket(
+                session_to_finalize['session_id'],
+                session_to_finalize['driver_id'],
+                session_to_finalize['kw_consumed'],
+                session_to_finalize['total_cost'],
+                False, 'Detenido por Central'
+            )
+            threading.Thread(
+                target=lambda: self._send_kafka('charging_complete', {
+                    'cp_id':      self.cp_id,
+                    'session_id': session_to_finalize['session_id'],
+                    'driver_id':  session_to_finalize['driver_id'],
+                    'kw_total':   session_to_finalize['kw_consumed'],
+                    'cost_total': session_to_finalize['total_cost'],
+                    'exitosa':    False,
+                    'razon':      'Detenido por Central',
+                    'timestamp':  time.time()
+                }, encrypt=True, require_ack=True),
+                daemon=True
+            ).start()
+            self._delete_session_backup()
 
         self.logger.warning("⛔ CP PARADO")
 
@@ -672,17 +600,15 @@ class ChargingPointEngine:
         self.logger.info("▶️ REANUDADO")
 
     def simular_averia(self):
-        print("\n" + "=" * 60)
-        print("💥 SIMULANDO AVERÍA")
-        print("=" * 60 + "\n")
+        print("\n💥 SIMULANDO AVERÍA\n")
         with self.lock:
             self.is_healthy = False
             if self.state == 'CHARGING' and self.current_session:
                 self.charging_active = False
                 time.sleep(0.5)
-                self._save_session_backup()
-                self.current_session = None
             self.state = 'IDLE'
+            self.current_session = None
+        self._save_session_backup()
         self.logger.error("💥 AVERÍA")
 
     def resolver_averia(self):
@@ -693,36 +619,28 @@ class ChargingPointEngine:
         self.logger.info("🔧 RESUELTA")
 
     # ------------------------------------------------------------------
-    # FIX [4.5]: Kafka send — flush solo en mensajes críticos
     # ------------------------------------------------------------------
 
     def _send_kafka(self, topic: str, payload: Dict[str, Any],
                     encrypt: bool = False, require_ack: bool = False):
-        """
-        Enviar a Kafka con cifrado condicional.
-        FIX [4.5]: flush/ack solo cuando require_ack=True (mensajes críticos).
-        """
         try:
-            if self.producer:
-                final_payload = payload
-                if encrypt and self.encryption_key and CRYPTO_AVAILABLE:
-                    try:
-                        encrypted_data = CryptoManager.encrypt_json(
-                            payload, self.encryption_key
-                        )
-                        final_payload = {
-                            'encrypted': True,
-                            'data': encrypted_data,
-                            'cp_id': self.cp_id
-                        }
-                    except Exception as e:
-                        self.logger.warning(f"⚠️ Error cifrando, enviando sin cifrar: {e}")
-
-                future = self.producer.send(topic, final_payload)
-                if require_ack:
-                    future.get(timeout=5)
+            if not self.producer:
+                return
+            final = payload
+            if encrypt and self.encryption_key and CRYPTO_AVAILABLE:
+                try:
+                    final = {
+                        'encrypted': True,
+                        'data':      CryptoManager.encrypt_json(payload, self.encryption_key),
+                        'cp_id':     self.cp_id
+                    }
+                except Exception as e:
+                    self.logger.warning("⚠️ Error cifrando, enviando sin cifrar: %s", e)
+            future = self.producer.send(topic, final)
+            if require_ack:
+                future.get(timeout=5)
         except Exception as e:
-            self.logger.error(f"❌ Error Kafka [{topic}]: {e}")
+            self.logger.error("❌ Error Kafka [%s]: %s", topic, e)
 
     # ------------------------------------------------------------------
     # Modo interactivo
@@ -730,10 +648,10 @@ class ChargingPointEngine:
 
     def _show_help(self):
         print("\n" + "=" * 60)
-        print(f"ENGINE {self.cp_id} - COMANDOS")
+        print(f"ENGINE {self.cp_id} — COMANDOS")
         print("=" * 60)
-        print("  1    - Enchufar vehículo (iniciar carga)")
-        print("  1m   - Carga MANUAL (emergencia)")
+        print("  1    - Enchufar vehículo (iniciar carga autorizada)")
+        print("  1m   - Carga MANUAL (emergencia, sin autorización)")
         print("  2    - Desenchufar (finalizar carga)")
         print("  3    - Simular avería")
         print("  4    - Resolver avería")
@@ -746,7 +664,10 @@ class ChargingPointEngine:
         self._show_help()
         try:
             while self.running:
-                cmd = input(f"\n[{self.cp_id}]> ").strip().lower()
+                try:
+                    cmd = input(f"\n[{self.cp_id}]> ").strip().lower()
+                except EOFError:
+                    break
                 if not cmd:
                     continue
 
@@ -770,88 +691,70 @@ class ChargingPointEngine:
                         print(f"Parado Central:  {'✅ Sí' if self.is_stopped_by_central else '❌ No'}")
                         print(f"Cifrado:         {'✅ Activo' if self.encryption_key else '⏳ Esperando key'}")
                         if self.current_session:
-                            print(f"\n🔋 SESIÓN ACTIVA:")
-                            print(f"  ID:      {self.current_session['session_id']}")
-                            print(f"  Driver:  {self.current_session['driver_id']}")
-                            print(f"  Consumo: {self.current_session['kw_consumed']:.2f} kWh")
-                            print(f"  Coste:   {self.current_session['total_cost']:.2f} €")
+                            print(f"Sesión activa:   {self.current_session['session_id']}")
+                            print(f"Consumo:         {self.current_session['kw_consumed']:.2f} kWh")
+                            print(f"Coste:           {self.current_session['total_cost']:.2f} €")
                         else:
-                            print("\n🔋 Sin sesión activa")
-                        if os.path.exists(self.session_backup_file):
-                            print("\n💾 Hay sesión guardada en disco (backup)")
+                            print("Sin sesión activa")
                         print("=" * 60 + "\n")
                 elif cmd == 'help':
                     self._show_help()
                 elif cmd in ('q', 'quit', 'exit'):
                     with self.lock:
-                        if self.state == 'CHARGING' and self.current_session:
-                            print("\n⚠️ HAY UNA CARGA EN PROGRESO")
-                            resp = input("¿Detener carga y salir? (s/n): ").lower()
-                            if resp == 's':
-                                print("\n🛑 Deteniendo carga...")
-                                self.charging_active = False
-                                time.sleep(0.5)
-                                self._save_session_backup()
-                                self.logger.info("💾 Sesión guardada para recuperación")
-                                break
-                            else:
-                                print("Cancelado.")
-                                continue
-                        else:
-                            break
+                        has_session = bool(self.current_session)
+                    if has_session:
+                        resp = input("\n⚠️ HAY CARGA EN PROGRESO. ¿Guardar y salir? (s/n): ").lower()
+                        if resp != 's':
+                            print("Cancelado.")
+                            continue
+                        self.charging_active = False
+                        time.sleep(0.5)
+                    # Backup fuera del lock
+                    self._save_session_backup()
+                    break
         except (KeyboardInterrupt, EOFError):
             print("\n\n🛑 Interrupción detectada...")
-            with self.lock:
-                if self.state == 'CHARGING' and self.current_session:
-                    print("💾 Guardando sesión en progreso...")
-                    self.charging_active = False
-                    time.sleep(0.5)
-                    self._save_session_backup()
-                    self.logger.info("✅ Sesión guardada para recuperación posterior")
+            self.charging_active = False
+            time.sleep(0.5)
+            self._save_session_backup()
         finally:
             self.shutdown()
+
+    # ------------------------------------------------------------------
+    # Shutdown # ------------------------------------------------------------------
 
     def shutdown(self):
         self.logger.info("🛑 Apagando Engine...")
         self.running = False
         self.charging_active = False
-
-        with self.lock:
-            if self.current_session:
-                try:
-                    self._save_session_backup()
-                    self.logger.info("💾 Sesión guardada en backup")
-                except Exception as e:
-                    self.logger.error(f"❌ Error guardando sesión: {e}")
-
-        for resource in [self.health_server, self.consumer, self.producer]:
+        time.sleep(0.2)
+        # Backup fuera del lock
+        self._save_session_backup()
+        for resource in (self.health_server, self.consumer, self.producer):
             try:
                 if resource:
                     resource.close()
             except Exception:
                 pass
-
-        self.logger.info("✅ Engine apagado correctamente")
-
+        self.logger.info("✅ Engine apagado")
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    cp_id = os.getenv('CP_ID', 'CP001')
-    listen_port = int(os.getenv('LISTEN_PORT', '6000'))
-    price = float(os.getenv('PRICE_PER_KWH', '0.50'))
-    kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
+    cp_id        = os.getenv('CP_ID',                      'CP001')
+    listen_port  = int(os.getenv('LISTEN_PORT',            '6000'))
+    price        = float(os.getenv('PRICE_PER_KWH',        '0.50'))
+    kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS',   'kafka:9092')
 
     engine = ChargingPointEngine(cp_id, listen_port, price, kafka_servers)
-
-    # FIX [5.4]: Manejo de SIGTERM
-    def handle_sigterm(signum, frame):
-        logger.info("🛑 SIGTERM recibido, cerrando Engine...")
+    def _handle_signal(signum, frame):
+        logging.info("🛑 Señal %d recibida — cerrando Engine...", signum)
         engine.shutdown()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
     engine.start()

@@ -3,17 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EVCharging - Panel de Control Profesional</title>
+    <title>EVCharging — Panel de Control</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         :root {
             --primary: #667eea;
-            --primary-dark: #5568d3;
             --secondary: #764ba2;
             --success: #10b981;
             --warning: #f59e0b;
@@ -24,920 +19,633 @@
         }
 
         body {
-            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
             min-height: 100vh;
             padding: 20px;
             color: var(--dark);
         }
 
-        .container {
-            max-width: 1600px;
-            margin: 0 auto;
-        }
+        .container { max-width: 1600px; margin: 0 auto; }
 
         .header {
             background: white;
-            padding: 25px 35px;
+            padding: 20px 30px;
             border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,.15);
+            margin-bottom: 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
-            gap: 20px;
+            gap: 16px;
         }
 
-        .header-title {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
+        .header-title { display: flex; align-items: center; gap: 12px; }
         .header-title h1 {
             background: linear-gradient(135deg, var(--primary), var(--secondary));
-            background-clip: text;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            font-size: 2.2em;
+            background-clip: text;
+            font-size: 2em;
             font-weight: 800;
         }
+        .header-title .icon { font-size: 2.2em; }
 
-        .header-title .icon {
-            font-size: 2.5em;
-        }
+        .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
-        .header-controls {
+        /* Indicador de auto-refresh */
+        .refresh-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.82em;
+            font-weight: 600;
+            background: #ede9fe;
+            color: #5b21b6;
             display: flex;
             align-items: center;
-            gap: 15px;
-            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .refresh-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--primary);
+            animation: spin-dot 2s linear infinite;
+        }
+        @keyframes spin-dot {
+            0%   { opacity: 1; transform: scale(1); }
+            50%  { opacity: 0.4; transform: scale(0.6); }
+            100% { opacity: 1; transform: scale(1); }
         }
 
         .status-badge {
-            padding: 12px 24px;
+            padding: 10px 20px;
             border-radius: 30px;
             font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 0.95em;
-            transition: all 0.3s ease;
-        }
-
-        .status-badge.online {
-            background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
-            color: white;
-            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
-        }
-
-        .status-badge.offline {
-            background: linear-gradient(135deg, var(--danger) 0%, #dc2626 100%);
-            color: white;
-            box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
-        }
-
-        .status-pulse {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: currentColor;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .config-panel {
-            background: white;
-            padding: 20px 30px;
-            border-radius: 12px;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-            margin-bottom: 25px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            flex-wrap: wrap;
-        }
-
-        .config-panel label {
-            font-weight: 600;
-            color: var(--dark);
-        }
-
-        .config-panel input {
-            padding: 12px 18px;
-            border: 2px solid var(--border);
-            border-radius: 8px;
-            flex: 1;
-            min-width: 250px;
-            font-size: 0.95em;
-            transition: all 0.3s ease;
-        }
-
-        .config-panel input:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
-        }
-
-        .btn {
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 700;
-            font-size: 0.95em;
-            transition: all 0.3s ease;
+            font-size: 0.9em;
             display: inline-flex;
             align-items: center;
             gap: 8px;
         }
+        .status-badge.online  { background: linear-gradient(135deg,#10b981,#059669); color: white; }
+        .status-badge.offline { background: linear-gradient(135deg,#ef4444,#dc2626); color: white; }
+        .status-pulse { width: 10px; height: 10px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            color: white;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-        }
-
-        .btn-secondary {
+        .config-panel {
             background: white;
-            color: var(--primary);
-            border: 2px solid var(--primary);
+            padding: 16px 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,.08);
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
         }
+        .config-panel label { font-weight: 600; white-space: nowrap; }
+        .config-panel input {
+            padding: 10px 14px;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            flex: 1;
+            min-width: 220px;
+            font-size: 0.93em;
+        }
+        .config-panel input:focus { outline: none; border-color: var(--primary); }
 
-        .btn-secondary:hover {
-            background: var(--primary);
-            color: white;
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.9em;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all .2s;
         }
+        .btn-primary { background: linear-gradient(135deg,var(--primary),var(--secondary)); color: white; }
+        .btn-primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
+        .btn-secondary { background: white; color: var(--primary); border: 2px solid var(--primary); }
+        .btn-secondary:hover { background: var(--primary); color: white; }
 
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
         }
-
         .stat-card {
             background: white;
-            padding: 28px;
-            border-radius: 16px;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
-            transition: all 0.3s ease;
+            padding: 24px;
+            border-radius: 14px;
+            box-shadow: 0 4px 16px rgba(0,0,0,.07);
             position: relative;
             overflow: hidden;
+            transition: transform .2s, box-shadow .2s;
         }
-
         .stat-card::before {
             content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 4px;
+            position: absolute; top: 0; left: 0; right: 0; height: 3px;
             background: linear-gradient(90deg, var(--primary), var(--secondary));
         }
-
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-        }
-
-        .stat-card h3 {
-            color: #64748b;
-            font-size: 0.85em;
-            margin-bottom: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            font-weight: 600;
-        }
-
+        .stat-card:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+        .stat-card h3 { color: #64748b; font-size: .78em; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 10px; }
         .stat-card .value {
-            font-size: 2.8em;
-            font-weight: 800;
+            font-size: 2.4em; font-weight: 800;
             background: linear-gradient(135deg, var(--primary), var(--secondary));
-            background-clip: text;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            line-height: 1.2;
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         }
-
-        .stat-card .subtitle {
-            font-size: 0.9em;
-            color: #94a3b8;
-            margin-top: 8px;
-        }
+        .stat-card .subtitle { font-size: .82em; color: #94a3b8; margin-top: 6px; }
 
         .section {
             background: white;
-            padding: 35px;
+            padding: 28px;
             border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-            margin-bottom: 30px;
+            box-shadow: 0 8px 32px rgba(0,0,0,.08);
+            margin-bottom: 24px;
         }
-
         .section-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 25px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid var(--light);
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--light);
         }
+        .section-title { font-size: 1.4em; font-weight: 800; display: flex; align-items: center; gap: 10px; }
 
-        .section-title {
-            font-size: 1.6em;
-            color: var(--dark);
-            font-weight: 800;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .section-title .icon {
-            font-size: 1.3em;
-        }
-
-        .cps-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 20px;
-        }
+        /* CP cards */
+        .cps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
 
         .cp-card {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-            padding: 24px;
-            border-radius: 16px;
+            padding: 20px;
+            border-radius: 14px;
             color: white;
-            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
-            transition: all 0.3s ease;
+            box-shadow: 0 6px 20px rgba(0,0,0,.15);
+            transition: transform .2s, box-shadow .2s;
             position: relative;
             overflow: hidden;
         }
-
         .cp-card::before {
             content: '';
-            position: absolute;
-            top: 0;
-            right: 0;
-            width: 100px;
-            height: 100px;
-            background: rgba(255, 255, 255, 0.1);
+            position: absolute; top: 0; right: 0;
+            width: 80px; height: 80px;
+            background: rgba(255,255,255,.1);
             border-radius: 50%;
-            transform: translate(30%, -30%);
+            transform: translate(25%,-25%);
+        }
+        .cp-card:hover { transform: translateY(-5px); box-shadow: 0 12px 32px rgba(0,0,0,.22); }
+
+        .cp-card.available    { background: linear-gradient(135deg,#10b981,#059669); }
+        .cp-card.charging     { background: linear-gradient(135deg,#f59e0b,#d97706); animation: glow-charging 2s infinite; }
+        .cp-card.stopped      { background: linear-gradient(135deg,#ef4444,#dc2626); }
+        .cp-card.broken       { background: linear-gradient(135deg,#8b5cf6,#7c3aed); }
+        .cp-card.disconnected { background: linear-gradient(135deg,#6b7280,#4b5563); opacity: .75; }
+
+        @keyframes glow-charging {
+            0%,100% { box-shadow: 0 6px 20px rgba(245,158,11,.35); }
+            50%      { box-shadow: 0 6px 30px rgba(245,158,11,.65); }
         }
 
-        .cp-card:hover {
-            transform: translateY(-8px) scale(1.02);
-            box-shadow: 0 15px 40px rgba(0,0,0,0.25);
-        }
-
-        .cp-card.available {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-        }
-
-        .cp-card.charging {
-            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-            animation: pulse-slow 2s infinite;
-        }
-
-        @keyframes pulse-slow {
-            0%, 100% { box-shadow: 0 8px 25px rgba(245, 158, 11, 0.3); }
-            50% { box-shadow: 0 8px 35px rgba(245, 158, 11, 0.6); }
-        }
-
-        .cp-card.stopped {
-            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-        }
-
-        .cp-card.broken {
-            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
-        }
-
-        .cp-card.disconnected {
-            background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
-            opacity: 0.7;
-        }
-
-        .cp-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 15px;
-        }
-
-        .cp-card h3 {
-            font-size: 1.4em;
-            font-weight: 800;
-            margin-bottom: 5px;
-        }
-
+        .cp-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+        .cp-card h3 { font-size: 1.3em; font-weight: 800; }
         .cp-badge {
-            background: rgba(255, 255, 255, 0.25);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.75em;
-            font-weight: 700;
-            backdrop-filter: blur(10px);
+            background: rgba(255,255,255,.25);
+            padding: 4px 12px; border-radius: 16px;
+            font-size: .72em; font-weight: 700;
+        }
+        .cp-info { font-size: .9em; opacity: .96; line-height: 1.8; }
+        .cp-info strong { display: block; font-size: 1.15em; margin-top: 6px; }
+        .cp-auth { font-size: .78em; margin-top: 6px; opacity: .9; }
+        .cp-weather {
+            background: rgba(255,255,255,.18);
+            border-left: 3px solid #fbbf24;
+            padding: 8px 12px; border-radius: 6px;
+            margin-top: 10px; font-size: .82em; font-weight: 600;
         }
 
-        .cp-info {
-            margin: 10px 0;
-            font-size: 0.95em;
-            opacity: 0.95;
-            line-height: 1.8;
+        /* Tables */
+        .tbl-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+        th {
+            background: var(--light); color: var(--dark);
+            padding: 12px 14px; text-align: left;
+            font-size: .78em; text-transform: uppercase; letter-spacing: .4px;
         }
-
-        .cp-info strong {
-            display: block;
-            font-size: 1.3em;
-            margin-top: 8px;
-        }
-
-        .weather-alert {
-            background: rgba(255, 255, 255, 0.2);
-            border-left: 4px solid #fbbf24;
-            padding: 12px 16px;
-            border-radius: 8px;
-            margin-top: 12px;
-            font-weight: 600;
-            font-size: 0.9em;
-            backdrop-filter: blur(10px);
-        }
-
-        .sessions-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0 8px;
-            margin-top: 20px;
-        }
-
-        .sessions-table th {
-            background: var(--light);
-            color: var(--dark);
-            padding: 16px 18px;
-            text-align: left;
-            font-weight: 700;
-            font-size: 0.85em;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            border-top: none;
-            border-bottom: none;
-        }
-
-        .sessions-table th:first-child {
-            border-radius: 8px 0 0 8px;
-        }
-
-        .sessions-table th:last-child {
-            border-radius: 0 8px 8px 0;
-        }
-
-        .sessions-table td {
-            padding: 16px 18px;
-            background: white;
-            border-top: 1px solid var(--border);
-            border-bottom: 1px solid var(--border);
-        }
-
-        .sessions-table td:first-child {
-            border-left: 1px solid var(--border);
-            border-radius: 8px 0 0 8px;
-        }
-
-        .sessions-table td:last-child {
-            border-right: 1px solid var(--border);
-            border-radius: 0 8px 8px 0;
-        }
-
-        .sessions-table tr:hover td {
-            background: var(--light);
-        }
-
-        .no-data {
-            text-align: center;
-            padding: 60px;
-            color: #9ca3af;
-            font-size: 1.2em;
-            font-weight: 500;
-        }
-
-        .loading {
-            text-align: center;
-            padding: 80px;
-            font-size: 1.4em;
-            color: var(--primary);
-            font-weight: 700;
-        }
-
-        .spinner {
-            border: 5px solid var(--light);
-            border-top: 5px solid var(--primary);
-            border-radius: 50%;
-            width: 60px;
-            height: 60px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .error {
-            background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-            color: #991b1b;
-            padding: 25px;
-            border-radius: 12px;
-            margin: 20px 0;
-            text-align: center;
-            font-weight: 600;
-            border-left: 5px solid #dc2626;
-        }
-
-        .timestamp {
-            text-align: center;
-            color: #64748b;
-            font-size: 0.9em;
-            margin-top: 25px;
-            font-weight: 500;
-        }
-
-        .alert-banner {
-            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-            border-left: 5px solid #f59e0b;
-            padding: 20px 25px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            box-shadow: 0 4px 15px rgba(245, 158, 11, 0.2);
-        }
-
-        .alert-banner .icon {
-            font-size: 2em;
-        }
+        td { padding: 13px 14px; border-bottom: 1px solid var(--border); font-size: .9em; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f8fafc; }
 
         .badge {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 0.8em;
-            font-weight: 700;
+            display: inline-block; padding: 3px 10px;
+            border-radius: 12px; font-size: .75em; font-weight: 700;
         }
-
         .badge-success { background: #d1fae5; color: #065f46; }
         .badge-warning { background: #fed7aa; color: #92400e; }
-        .badge-danger { background: #fecaca; color: #991b1b; }
-        .badge-info { background: #dbeafe; color: #1e40af; }
+        .badge-danger  { background: #fecaca; color: #991b1b; }
+        .badge-info    { background: #dbeafe; color: #1e40af; }
+
+        .alert-banner {
+            background: linear-gradient(135deg,#fef3c7,#fde68a);
+            border-left: 5px solid #f59e0b;
+            padding: 16px 20px; border-radius: 12px;
+            margin-bottom: 16px;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .alert-banner .icon { font-size: 1.8em; }
+
+        .no-data { text-align: center; padding: 48px; color: #9ca3af; font-size: 1.1em; }
+        .loading { text-align: center; padding: 60px; font-size: 1.2em; color: var(--primary); font-weight: 700; }
+        .spinner {
+            border: 5px solid var(--light); border-top: 5px solid var(--primary);
+            border-radius: 50%; width: 50px; height: 50px;
+            animation: spin 1s linear infinite; margin: 16px auto;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error {
+            background: #fee2e2; color: #991b1b; padding: 20px; border-radius: 12px;
+            margin: 16px 0; border-left: 5px solid #dc2626; white-space: pre-line;
+        }
+        .timestamp { text-align: center; color: #64748b; font-size: .85em; margin-top: 20px; }
 
         @media (max-width: 768px) {
-            .header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            .stats-grid {
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            }
-
-            .cps-grid {
-                grid-template-columns: 1fr;
-            }
+            .header { flex-direction: column; align-items: flex-start; }
+            .cps-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <!-- HEADER -->
-        <div class="header">
-            <div class="header-title">
-                <span class="icon">⚡</span>
-                <h1>EVCharging Network</h1>
-            </div>
-            <div class="header-controls">
-                <div id="connection-status" class="status-badge offline">
-                    <span class="status-pulse"></span>
-                    <span>Sin conexión</span>
-                </div>
-            </div>
+<div class="container">
+
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-title">
+            <span class="icon">⚡</span>
+            <h1>EVCharging Network</h1>
         </div>
-
-        <!-- CONFIG PANEL -->
-        <div class="config-panel">
-            <label for="api-url">🌐 API Central:</label>
-            <input type="text" id="api-url" value="http://localhost:8080" placeholder="http://ip:puerto">
-            <button class="btn btn-primary" onclick="updateApiUrl()">💾 Guardar</button>
-            <button class="btn btn-secondary" onclick="fetchData()">🔄 Recargar</button>
-        </div>
-
-        <!-- LOADING -->
-        <div id="loading" class="loading" style="display: none;">
-            <div class="spinner"></div>
-            <div>Cargando datos del sistema...</div>
-        </div>
-
-        <!-- ERROR -->
-        <div id="error" class="error" style="display: none;"></div>
-
-        <!-- CONTENT -->
-        <div id="content" style="display: none;">
-            <!-- WEATHER ALERTS BANNER -->
-            <div id="alerts-banner" style="display: none;" class="alert-banner">
-                <span class="icon">❄️</span>
-                <div>
-                    <strong>Alertas Climáticas Activas</strong>
-                    <p id="alerts-summary">Hay CPs afectados por condiciones climáticas adversas</p>
-                </div>
+        <div class="header-right">
+            <div class="refresh-badge">
+                <span class="refresh-dot"></span>
+                Auto-refresh 2s
             </div>
-
-            <!-- ESTADÍSTICAS -->
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <h3>Total CPs</h3>
-                    <div class="value" id="stat-total-cps">0</div>
-                    <div class="subtitle">Puntos registrados</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Disponibles</h3>
-                    <div class="value" id="stat-available">0</div>
-                    <div class="subtitle">Listos para usar</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Cargando Ahora</h3>
-                    <div class="value" id="stat-charging">0</div>
-                    <div class="subtitle">Sesiones activas</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Energía Total</h3>
-                    <div class="value" id="stat-energy">0</div>
-                    <div class="subtitle">kWh suministrados</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Ingresos</h3>
-                    <div class="value" id="stat-revenue">0€</div>
-                    <div class="subtitle">Total acumulado</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Alertas</h3>
-                    <div class="value" id="stat-alerts">0</div>
-                    <div class="subtitle">Incidencias activas</div>
-                </div>
+            <div id="connection-status" class="status-badge offline">
+                <span class="status-pulse"></span>
+                <span>Sin conexión</span>
             </div>
-
-            <!-- CHARGING POINTS -->
-            <div class="section">
-                <div class="section-header">
-                    <div class="section-title">
-                        <span class="icon">📍</span>
-                        <span>Charging Points</span>
-                    </div>
-                </div>
-                <div id="cps-grid" class="cps-grid"></div>
-            </div>
-
-            <!-- SESIONES ACTIVAS -->
-            <div class="section">
-                <div class="section-header">
-                    <div class="section-title">
-                        <span class="icon">⚡</span>
-                        <span>Sesiones de Carga Activas</span>
-                    </div>
-                </div>
-                <div id="active-sessions"></div>
-            </div>
-
-            <!-- HISTORIAL -->
-            <div class="section">
-                <div class="section-header">
-                    <div class="section-title">
-                        <span class="icon">📊</span>
-                        <span>Historial Reciente</span>
-                    </div>
-                </div>
-                <div id="session-history"></div>
-            </div>
-
-            <div class="timestamp" id="last-update"></div>
         </div>
     </div>
 
-    <script>
-        let apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8080';
-        document.getElementById('api-url').value = apiUrl;
+    <!-- CONFIG -->
+    <div class="config-panel">
+        <label for="api-url">🌐 API Central:</label>
+        <!-- [FIX BUG 4/15] Puerto corregido a 8082 -->
+        <input type="text" id="api-url" value="http://localhost:8082" placeholder="http://ip:8082">
+        <button class="btn btn-primary" onclick="saveAndReload()">💾 Guardar</button>
+        <button class="btn btn-secondary" onclick="fetchData()">🔄 Recargar ahora</button>
+    </div>
 
-        function updateApiUrl() {
-            apiUrl = document.getElementById('api-url').value.trim();
-            localStorage.setItem('apiUrl', apiUrl);
-            fetchData();
-        }
+    <div id="loading" class="loading" style="display:none">
+        <div class="spinner"></div>
+        Cargando datos del sistema...
+    </div>
+    <div id="error" class="error" style="display:none"></div>
 
-        function showLoading() {
-            document.getElementById('loading').style.display = 'block';
-            document.getElementById('content').style.display = 'none';
-            document.getElementById('error').style.display = 'none';
-        }
+    <div id="content" style="display:none">
+        <!-- Alertas climáticas -->
+        <div id="alerts-banner" class="alert-banner" style="display:none">
+            <span class="icon">❄️</span>
+            <div>
+                <strong>Alertas Climáticas Activas</strong>
+                <p id="alerts-summary"></p>
+            </div>
+        </div>
 
-        function showContent() {
-            document.getElementById('loading').style.display = 'none';
-            document.getElementById('content').style.display = 'block';
-            document.getElementById('error').style.display = 'none';
-        }
+        <!-- Estadísticas -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total CPs</h3>
+                <div class="value" id="stat-total-cps">0</div>
+                <div class="subtitle">Registrados en el sistema</div>
+            </div>
+            <div class="stat-card">
+                <h3>Disponibles</h3>
+                <div class="value" id="stat-available">0</div>
+                <div class="subtitle">Listos para usar</div>
+            </div>
+            <div class="stat-card">
+                <h3>Cargando ahora</h3>
+                <div class="value" id="stat-charging">0</div>
+                <div class="subtitle">Sesiones activas</div>
+            </div>
+            <div class="stat-card">
+                <h3>Energía total</h3>
+                <div class="value" id="stat-energy">0</div>
+                <div class="subtitle">kWh suministrados</div>
+            </div>
+            <div class="stat-card">
+                <h3>Ingresos</h3>
+                <div class="value" id="stat-revenue">0€</div>
+                <div class="subtitle">Total acumulado</div>
+            </div>
+            <div class="stat-card">
+                <h3>Alertas weather</h3>
+                <div class="value" id="stat-alerts">0</div>
+                <div class="subtitle">Incidencias activas</div>
+            </div>
+        </div>
 
-        function showError(message) {
-            document.getElementById('loading').style.display = 'none';
-            document.getElementById('content').style.display = 'none';
-            document.getElementById('error').style.display = 'block';
-            document.getElementById('error').textContent = '❌ ' + message;
-        }
+        <!-- Charging Points -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title"><span>📍</span> Charging Points</div>
+            </div>
+            <div id="cps-grid" class="cps-grid"></div>
+        </div>
 
-        function updateConnectionStatus(online) {
-            const badge = document.getElementById('connection-status');
-            if (online) {
-                badge.className = 'status-badge online';
-                badge.innerHTML = '<span class="status-pulse"></span><span>Conectado</span>';
-            } else {
-                badge.className = 'status-badge offline';
-                badge.innerHTML = '<span class="status-pulse"></span><span>Sin conexión</span>';
-            }
-        }
+        <!-- Sesiones activas -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title"><span>⚡</span> Sesiones de Carga Activas</div>
+            </div>
+            <div id="active-sessions"></div>
+        </div>
 
-        async function fetchData() {
-            showLoading();
+        <!-- Historial -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title"><span>📊</span> Historial Reciente</div>
+            </div>
+            <div id="session-history"></div>
+        </div>
 
-            try {
-                console.log(`Fetching data from: ${apiUrl}/api/v1/system/status`); // DEBUG
-                
-                const response = await fetch(`${apiUrl}/api/v1/system/status`, {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    mode: 'cors' // Explícitamente permitir CORS
-                });
-                
-                console.log('Response status:', response.status); // DEBUG
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
+        <div class="timestamp" id="last-update"></div>
+    </div>
+</div>
 
-                const data = await response.json();
-                console.log('Data received:', data); // DEBUG
-                
-                updateConnectionStatus(true);
-                renderData(data);
-                showContent();
+<script>
+    // [FIX BUG 15] Leer URL guardada en localStorage, default al puerto correcto 8082
+    let apiUrl = localStorage.getItem('evcharging_apiUrl') || 'http://localhost:8082';
+    document.getElementById('api-url').value = apiUrl;
 
-                document.getElementById('last-update').textContent = 
-                    `Última actualización: ${new Date().toLocaleString('es-ES')}`;
-
-            } catch (error) {
-                console.error('Error fetching data:', error);
-                console.error('API URL:', apiUrl);
-                updateConnectionStatus(false);
-                showError(`No se pudo conectar con la API: ${error.message}\n\nURL: ${apiUrl}/api/v1/system/status\n\nVerifica que:\n1. El contenedor api_central está corriendo\n2. La URL es correcta\n3. No hay errores de CORS`);
-            }
-        }
-
-
-function renderData(data) {
-    console.log('Renderizando datos:', data);
-    
-    if (!data) {
-        console.error('No hay datos para renderizar');
-        showError('No se recibieron datos del servidor');
-        return;
-    }
-    
-    // ESTADÍSTICAS
-    const stats = data.stats || {};
-    document.getElementById('stat-total-cps').textContent = stats.total_cps || 0;
-    document.getElementById('stat-available').textContent = (stats.cps_by_status && stats.cps_by_status.AVAILABLE) || 0;
-    document.getElementById('stat-charging').textContent = (stats.cps_by_status && stats.cps_by_status.CHARGING) || 0;
-    document.getElementById('stat-energy').textContent = (stats.total_energy_kwh || 0).toFixed(1);
-    document.getElementById('stat-revenue').textContent = `${(stats.total_revenue_eur || 0).toFixed(2)}€`;
-    document.getElementById('stat-alerts').textContent = stats.weather_alerts || 0;
-
-    // ALERTAS BANNER
-    const alertsBanner = document.getElementById('alerts-banner');
-    if (stats.weather_alerts > 0) {
-        alertsBanner.style.display = 'flex';
-        document.getElementById('alerts-summary').textContent = 
-            `${stats.weather_alerts} CP${stats.weather_alerts > 1 ? 's' : ''} afectado${stats.weather_alerts > 1 ? 's' : ''} por condiciones climáticas adversas`;
-    } else {
-        alertsBanner.style.display = 'none';
+    function saveAndReload() {
+        apiUrl = document.getElementById('api-url').value.trim().replace(/\/$/, '');
+        localStorage.setItem('evcharging_apiUrl', apiUrl);
+        fetchData();
     }
 
-    // CHARGING POINTS
-    const cpsGrid = document.getElementById('cps-grid');
-    const cps = data.cps || [];
-
-    if (cps.length === 0) {
-        cpsGrid.innerHTML = '<div class="no-data">🔭 No hay CPs registrados</div>';
-    } else {
-        cpsGrid.innerHTML = cps.map(cp => {
-            const statusClass = (cp.status || 'DISCONNECTED').toLowerCase();
-            const statusText = {
-                'AVAILABLE': 'Disponible',
-                'CHARGING': 'Cargando',
-                'STOPPED': 'Fuera de Servicio',
-                'BROKEN': 'Averiado',
-                'DISCONNECTED': 'Desconectado'
-            }[cp.status] || cp.status;
-
-            const statusIcon = {
-                'AVAILABLE': '✅',
-                'CHARGING': '⚡',
-                'STOPPED': '⛔',
-                'BROKEN': '💥',
-                'DISCONNECTED': '❌'
-            }[cp.status] || '❓';
-
-            let weatherAlert = '';
-            if (cp.weather_alert && cp.weather_alert.active) {
-                weatherAlert = `
-                    <div class="weather-alert">
-                        ❄️ ${cp.weather_alert.temperature}°C - Operación suspendida
-                    </div>
-                `;
-            }
-
-            let weatherLocationDisplay = cp.weather_location 
-                ? `<div style="font-size: 0.85em; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 5px; opacity: 0.9;">
-                    🌡️ Monitoreando clima en: <strong>${cp.weather_location}</strong>
-                   </div>` 
-                : '';
-
-            // CRÍTICO: Mostrar estado de autenticación
-            let authBadge = '';
-            if (cp.authenticated) {
-                authBadge = '<span class="badge badge-success" style="margin-left: 5px;">🔒 Auth</span>';
-            }
-/*
-            return `
-                <div class="cp-card ${statusClass}">
-                    <div class="cp-header">
-                        <h3>${cp.cp_id} ${authBadge}</h3>
-                        <span class="cp-badge">${statusIcon} ${statusText}</span>
-                    </div>
-                    <div class="cp-info">
-                        📍 ${cp.location || 'Sin ubicación'}<br>
-                        💰 ${cp.price || 0}€/kWh
-                        <strong>${statusText}</strong>
-                    </div>
-                    ${weatherAlert}
-                </div>
-            `;
-            */
-           return `
-                <div class="cp-card ${statusClass}">
-                    ...
-                    <div class="cp-info">
-                        📍 ${cp.location || 'Sin ubicación'}<br>
-                        💰 ${cp.price || 0}€/kWh
-                        <strong>${statusText}</strong>
-                    </div>
-                    ${weatherAlert}
-                    ${weatherLocationDisplay}  </div>
-            `;
-        }).join('');
+    function setStatus(online) {
+        const b = document.getElementById('connection-status');
+        if (online) {
+            b.className = 'status-badge online';
+            b.innerHTML = '<span class="status-pulse"></span><span>Conectado</span>';
+        } else {
+            b.className = 'status-badge offline';
+            b.innerHTML = '<span class="status-pulse"></span><span>Sin conexión</span>';
+        }
     }
 
-    // SESIONES ACTIVAS
-    const sessionsDiv = document.getElementById('active-sessions');
-    const sessions = data.active_sessions || [];
-
-    if (sessions.length === 0) {
-        sessionsDiv.innerHTML = '<div class="no-data">🔭 No hay sesiones activas</div>';
-    } else {
-        sessionsDiv.innerHTML = `
-            <table class="sessions-table">
-                <thead>
-                    <tr>
-                        <th>Sesión</th>
-                        <th>CP</th>
-                        <th>Driver</th>
-                        <th>Inicio</th>
-                        <th>Consumo</th>
-                        <th>Coste</th>
-                        <th>Estado</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${sessions.map(s => {
-                        const startTime = s.start_time_formatted || 
-                                        new Date(s.start_time * 1000).toLocaleString('es-ES');
-                        const kw = parseFloat(s.kw_consumed || 0).toFixed(2);
-                        const cost = parseFloat(s.total_cost || 0).toFixed(2);
-                        
-                        return `
-                            <tr>
-                                <td><span class="badge badge-info">${s.session_id}</span></td>
-                                <td><strong>${s.cp_id}</strong></td>
-                                <td>${s.driver_id}</td>
-                                <td>${startTime}</td>
-                                <td><strong>⚡ ${kw} kWh</strong></td>
-                                <td><strong>💶 ${cost}€</strong></td>
-                                <td><span class="badge badge-warning">🔄 En progreso</span></td>
-                            </tr>
-                        `;
-                    }).join('')}
-                </tbody>
-            </table>
-        `;
+    function showLoading() {
+        document.getElementById('loading').style.display = 'block';
+        document.getElementById('content').style.display = 'none';
+        document.getElementById('error').style.display = 'none';
+    }
+    function showContent() {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('content').style.display = 'block';
+        document.getElementById('error').style.display = 'none';
+    }
+    function showError(msg) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('content').style.display = 'none';
+        const el = document.getElementById('error');
+        el.style.display = 'block';
+        el.textContent = '❌ ' + msg;
     }
 
-    // HISTORIAL - NUEVO ENDPOINT IMPLEMENTADO
-    fetchSessionHistory();
-}
+    // ---------------------------------------------------------------
+    // Fetch principal
+    // ---------------------------------------------------------------
+    let firstLoad = true;
 
-// NUEVA FUNCIÓN: Cargar historial de sesiones
-async function fetchSessionHistory() {
-    try {
-        const response = await fetch(`${apiUrl}/api/v1/sessions/history?limit=20`, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            },
-            mode: 'cors'
-        });
+    async function fetchData() {
+        if (firstLoad) showLoading();
+        try {
+            const res = await fetch(`${apiUrl}/api/v1/system/status`, {
+                cache: 'no-store'
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+            const data = await res.json();
+            setStatus(true);
+            renderData(data);
+            showContent();
+            firstLoad = false;
+            document.getElementById('last-update').textContent =
+                'Última actualización: ' + new Date().toLocaleString('es-ES');
+        } catch (err) {
+            setStatus(false);
+            const hint = `\nURL configurada: ${apiUrl}/api/v1/system/status\n\n` +
+                         'Verifica:\n' +
+                         '  1. El contenedor api_central está corriendo\n' +
+                         '  2. La IP/puerto son correctos (por defecto :8082)\n' +
+                         '  3. No hay problemas de red o CORS';
+            if (firstLoad) showError(err.message + hint);
+            else console.warn('Fetch error (silenciado en refresco):', err.message);
+        }
+    }
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+    // ---------------------------------------------------------------
+    // Render
+    // ---------------------------------------------------------------
+    function renderData(data) {
+        if (!data) return;
+
+        // Estadísticas
+        const s = data.stats || {};
+        const byStatus = s.cps_by_status || {};
+        document.getElementById('stat-total-cps').textContent  = s.total_cps || 0;
+        document.getElementById('stat-available').textContent  = byStatus.AVAILABLE || 0;
+        document.getElementById('stat-charging').textContent   = byStatus.CHARGING  || 0;
+        document.getElementById('stat-energy').textContent     = (s.total_energy_kwh || 0).toFixed(1);
+        document.getElementById('stat-revenue').textContent    = (s.total_revenue_eur || 0).toFixed(2) + '€';
+        document.getElementById('stat-alerts').textContent     = s.weather_alerts || 0;
+
+        // Banner alertas
+        const alertsBanner = document.getElementById('alerts-banner');
+        if (s.weather_alerts > 0) {
+            alertsBanner.style.display = 'flex';
+            document.getElementById('alerts-summary').textContent =
+                `${s.weather_alerts} CP${s.weather_alerts > 1 ? 's' : ''} ` +
+                `afectado${s.weather_alerts > 1 ? 's' : ''} por condiciones climáticas adversas`;
+        } else {
+            alertsBanner.style.display = 'none';
         }
 
-        const sessions = await response.json();
-        
-        const historyDiv = document.getElementById('session-history');
-        
-        if (!sessions || sessions.length === 0) {
-            historyDiv.innerHTML = '<div class="no-data">📭 No hay historial de sesiones</div>';
+        // CPs
+        renderCPs(data.cps || []);
+
+        // Sesiones activas
+        renderActiveSessions(data.active_sessions || []);
+
+        // Historial (llamada separada para no bloquear el render principal)
+        fetchHistory();
+    }
+
+    // ---------------------------------------------------------------
+    // [FIX BUG 2] CP card corregida — renderiza cp_id, auth, weather
+    // ---------------------------------------------------------------
+    function renderCPs(cps) {
+        const grid = document.getElementById('cps-grid');
+        if (!cps.length) {
+            grid.innerHTML = '<div class="no-data">🔭 No hay CPs registrados</div>';
             return;
         }
 
-        historyDiv.innerHTML = `
-            <table class="sessions-table">
-                <thead>
-                    <tr>
-                        <th>Sesión</th>
-                        <th>CP</th>
-                        <th>Driver</th>
-                        <th>Inicio</th>
-                        <th>Fin</th>
-                        <th>Consumo</th>
-                        <th>Coste</th>
-                        <th>Estado</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${sessions.map(s => {
-                        const exitosa = s.exitosa === 1 || s.exitosa === true;
-                        const startTime = s.start_time_formatted || 
-                                        new Date(s.start_time * 1000).toLocaleString('es-ES');
-                        const endTime = s.end_time_formatted || 
-                                      new Date(s.end_time * 1000).toLocaleString('es-ES');
-                        const kw = parseFloat(s.kw_consumed || 0).toFixed(2);
-                        const cost = parseFloat(s.total_cost || 0).toFixed(2);
-                        
-                        const statusBadge = exitosa 
-                            ? '<span class="badge badge-success">✅ Completada</span>'
-                            : `<span class="badge badge-danger">⚠️ ${s.razon || 'Interrumpida'}</span>`;
-                        
-                        return `
-                            <tr>
-                                <td><span class="badge badge-info">${s.session_id}</span></td>
-                                <td><strong>${s.cp_id}</strong></td>
-                                <td>${s.driver_id}</td>
-                                <td>${startTime}</td>
-                                <td>${endTime}</td>
-                                <td><strong>⚡ ${kw} kWh</strong></td>
-                                <td><strong>💶 ${cost}€</strong></td>
-                                <td>${statusBadge}</td>
-                            </tr>
-                        `;
-                    }).join('')}
-                </tbody>
-            </table>
-        `;
-    } catch (error) {
-        console.error('Error cargando historial:', error);
-        document.getElementById('session-history').innerHTML = 
-            '<div class="no-data">❌ Error cargando historial</div>';
+        const STATUS_CLASS = {
+            AVAILABLE:    'available',
+            CHARGING:     'charging',
+            STOPPED:      'stopped',
+            BROKEN:       'broken',
+            DISCONNECTED: 'disconnected'
+        };
+        const STATUS_LABEL = {
+            AVAILABLE:    'Disponible',
+            CHARGING:     'Cargando',
+            STOPPED:      'Fuera de servicio',
+            BROKEN:       'Averiado',
+            DISCONNECTED: 'Desconectado'
+        };
+        const STATUS_ICON = {
+            AVAILABLE:    '✅',
+            CHARGING:     '⚡',
+            STOPPED:      '⛔',
+            BROKEN:       '💥',
+            DISCONNECTED: '❌'
+        };
+
+        grid.innerHTML = cps.map(cp => {
+            const status    = cp.status || 'DISCONNECTED';
+            const cls       = STATUS_CLASS[status]  || 'disconnected';
+            const label     = STATUS_LABEL[status]  || status;
+            const icon      = STATUS_ICON[status]   || '❓';
+            const authText  = cp.authenticated
+                ? '🔒 Autenticado'
+                : '⚠️ Sin autenticar';
+
+            const weatherHtml = (cp.weather_alert && cp.weather_alert.active)
+                ? `<div class="cp-weather">❄️ ${Number(cp.weather_alert.temperature).toFixed(1)}°C — Operación suspendida</div>`
+                : '';
+
+            const locationMonHtml = cp.weather_location
+                ? `<div style="font-size:.78em;margin-top:6px;opacity:.85;">🌡️ Clima: <strong>${cp.weather_location}</strong></div>`
+                : '';
+
+            return `
+            <div class="cp-card ${cls}">
+                <div class="cp-header">
+                    <h3>${cp.cp_id}</h3>
+                    <span class="cp-badge">${icon} ${label}</span>
+                </div>
+                <div class="cp-info">
+                    📍 ${cp.location || 'Sin ubicación'}<br>
+                    💰 ${Number(cp.price || 0).toFixed(2)}€/kWh
+                    <strong>${label}</strong>
+                </div>
+                <div class="cp-auth">${authText}</div>
+                ${weatherHtml}
+                ${locationMonHtml}
+            </div>`;
+        }).join('');
     }
-}
-    </script>
+
+    function renderActiveSessions(sessions) {
+        const div = document.getElementById('active-sessions');
+        if (!sessions.length) {
+            div.innerHTML = '<div class="no-data">🔭 No hay sesiones activas</div>';
+            return;
+        }
+        div.innerHTML = `
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>Sesión</th><th>CP</th><th>Driver</th>
+              <th>Inicio</th><th>Consumo</th><th>Coste</th><th>Estado</th>
+            </tr></thead>
+            <tbody>
+              ${sessions.map(s => {
+                const start = s.start_time_formatted ||
+                    (s.start_time ? new Date(s.start_time * 1000).toLocaleString('es-ES') : '—');
+                return `<tr>
+                  <td><span class="badge badge-info">${s.session_id}</span></td>
+                  <td><strong>${s.cp_id}</strong></td>
+                  <td>${s.driver_id}</td>
+                  <td>${start}</td>
+                  <td><strong>⚡ ${Number(s.kw_consumed || 0).toFixed(2)} kWh</strong></td>
+                  <td><strong>💶 ${Number(s.total_cost || 0).toFixed(2)}€</strong></td>
+                  <td><span class="badge badge-warning">🔄 En progreso</span></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+
+    async function fetchHistory() {
+        try {
+            const res = await fetch(`${apiUrl}/api/v1/sessions/history?limit=20`, {
+                cache: 'no-store'
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const sessions = await res.json();
+            const div = document.getElementById('session-history');
+            if (!sessions || !sessions.length) {
+                div.innerHTML = '<div class="no-data">📭 No hay historial de sesiones</div>';
+                return;
+            }
+            div.innerHTML = `
+            <div class="tbl-wrap">
+              <table>
+                <thead><tr>
+                  <th>Sesión</th><th>CP</th><th>Driver</th>
+                  <th>Inicio</th><th>Fin</th><th>Consumo</th><th>Coste</th><th>Estado</th>
+                </tr></thead>
+                <tbody>
+                  ${sessions.map(s => {
+                    const ok    = s.exitosa === 1 || s.exitosa === true;
+                    const start = s.start_time_formatted ||
+                        (s.start_time ? new Date(s.start_time * 1000).toLocaleString('es-ES') : '—');
+                    const end   = s.end_time_formatted ||
+                        (s.end_time ? new Date(s.end_time * 1000).toLocaleString('es-ES') : '—');
+                    const badge = ok
+                        ? '<span class="badge badge-success">✅ Completada</span>'
+                        : `<span class="badge badge-danger">⚠️ ${s.razon || 'Interrumpida'}</span>`;
+                    return `<tr>
+                      <td><span class="badge badge-info">${s.session_id}</span></td>
+                      <td><strong>${s.cp_id}</strong></td>
+                      <td>${s.driver_id}</td>
+                      <td>${start}</td>
+                      <td>${end}</td>
+                      <td><strong>⚡ ${Number(s.kw_consumed || 0).toFixed(2)} kWh</strong></td>
+                      <td><strong>💶 ${Number(s.total_cost || 0).toFixed(2)}€</strong></td>
+                      <td>${badge}</td>
+                    </tr>`;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>`;
+        } catch (e) {
+            document.getElementById('session-history').innerHTML =
+                '<div class="no-data">❌ Error cargando historial</div>';
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // [FIX BUG 3] setInterval: auto-refresh cada 2 segundos
+    // ---------------------------------------------------------------
+    fetchData();
+    setInterval(fetchData, 2000);
+</script>
 </body>
 </html>

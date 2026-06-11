@@ -1,29 +1,21 @@
-# Docker Compose para EVCharging - Release 2 CORREGIDO
-# Corrige:
-#   [2.1] Topic weather_sync añadido a kafka-init
-#   [2.3] CENTRAL_API_URL corregido a puerto 8082
-#   [3.1] Imagen separada evcharging-app para CPs y Drivers
-#   [3.2] DISPLAY compatible Linux/macOS con fallback
-#   [3.3] weather sin restart automático (servicio interactivo)
-#   [3.4] X11 descomentado para Tkinter en Linux
-#   [1.4] JWT_SECRET_KEY sin valor por defecto inseguro
-#   [1.5] WEATHER_API_KEY añadida a weather y api_central
-#   [6.3] healthchecks añadidos a los servicios principales
-
+# Docker Compose para EVCharging — Release 2
 networks:
   evcharging:
     driver: bridge
     name: evcharging_net
 
 volumes:
-  db_data:
-  audit_data:
-  registry_certs:   # Volumen compartido para el certificado TLS del Registry
+  db_data:        # BD compartida entre central, api_central y registry
+  audit_data:     # Logs de auditoría
+  registry_certs: # Certificado TLS del Registry (compartido con central)
+  # En despliegue distribuido (CPs en otro PC) se usa un bind-mount local
+  # o se pasan las IPs correctas; en despliegue local este volumen es suficiente
+  cp_data:
 
 services:
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
   # INFRAESTRUCTURA BASE
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -46,12 +38,15 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
-    ports: ["9092:9092"]
+    ports:
+      - "9092:9092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # CAMBIAR localhost por la IP real del PC1 si es despliegue distribuido
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      # En local: KAFKA_EXTERNAL_IP=localhost (valor por defecto).
+      # En distribuido: export KAFKA_EXTERNAL_IP=<IP_PC1> antes de docker compose up.
+      KAFKA_ADVERTISED_LISTENERS: >-
+        INTERNAL://kafka:29092,EXTERNAL://${KAFKA_EXTERNAL_IP:-localhost}:9092
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
@@ -64,42 +59,41 @@ services:
       timeout: 10s
       retries: 5
     restart: unless-stopped
-
-  # Imagen de aplicación base (usada por CPs/Drivers en lanzamiento externo)
-  # FIX [3.1]: construir imagen con nombre propio en lugar de reutilizar kafka-init
-  app-base:
-    build: .
-    image: evcharging-app:latest
-    container_name: evcharging-app-builder
-    networks: [evcharging]
-    command: echo "✅ Imagen evcharging-app construida"
-
   kafka-init:
-    image: evcharging-app:latest
+    image: confluentinc/cp-kafka:7.5.0
     container_name: kafka-init
     networks: [evcharging]
     depends_on:
       kafka:
         condition: service_healthy
-      app-base:
-        condition: service_completed_successfully
-    command: >
-      bash -c "
-      echo '⏳ Esperando Kafka...';
-      sleep 15;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic service_requests --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic service_authorizations --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic charging_data --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic charging_complete --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic driver_notifications --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic central_commands --partitions 1 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic weather_sync --partitions 1 --replication-factor 1;
-      echo '✅ Topics creados (incluye weather_sync)';
-      "
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo '⏳ Esperando Kafka...'; sleep 10;
+        for topic in service_requests service_authorizations charging_data \
+                     charging_complete driver_notifications central_commands \
+                     weather_sync; do
+          kafka-topics --create --if-not-exists \
+            --bootstrap-server kafka:29092 \
+            --topic $$topic --partitions 1 --replication-factor 1;
+          echo "✅ Topic: $$topic";
+        done;
+        echo '✅ Todos los topics creados';
 
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
+  # IMAGEN DE APLICACIÓN (build único, usada por todos los servicios Python)
+  # ───────────────────────────────────────────────────────────────────
+
+  app-build:
+    build: .
+    image: evcharging-app:latest
+    container_name: evcharging-build
+    command: echo "✅ Imagen evcharging-app construida"
+    networks: [evcharging]
+
+  # ───────────────────────────────────────────────────────────────────
   # CENTRAL
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
 
   central:
     image: evcharging-app:latest
@@ -110,23 +104,26 @@ services:
         condition: service_completed_successfully
       registry:
         condition: service_started
-    ports: ["5001:5001"]
+      app-build:
+        condition: service_completed_successfully
+    ports:
+      - "5001:5001"
     volumes:
-      - ./central:/app/central:rw
+      - ./central:/app/central:ro
       - ./security:/app/security:ro
       - db_data:/app/data
       - audit_data:/app/audit
-      - registry_certs:/app/certs:ro    # Certificado del Registry para verificar SSL
+      - registry_certs:/app/certs:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       SOCKET_PORT: 5001
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       DB_PATH: /app/data/evcharging.db
+      AUDIT_LOG: /app/audit/audit.log
       REGISTRY_URL: https://ev_registry:8443
       REGISTRY_CERT_PATH: /app/certs/registry.crt
       CP_DATA_DIR: /app/data/cp_credentials
-      MACHINE_SECRET: ${MACHINE_SECRET:-evcharging-lab-secret}
-      # FIX [3.2]: DISPLAY compatible Linux/macOS
+      MACHINE_SECRET: ${MACHINE_SECRET:?MACHINE_SECRET debe estar en .env}
       DISPLAY: ${DISPLAY:-:0}
       LOG_LEVEL: INFO
     command: python central/ev_central.py
@@ -138,25 +135,28 @@ services:
       timeout: 10s
       retries: 3
 
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
   # REGISTRY
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
 
   registry:
     image: evcharging-app:latest
     container_name: ev_registry
     networks: [evcharging]
-    ports: ["8443:8443"]
+    depends_on:
+      app-build:
+        condition: service_completed_successfully
+    ports:
+      - "8443:8443"
     volumes:
-      - ./registry:/app/registry:rw
+      - ./registry:/app/registry:ro
       - ./security:/app/security:ro
       - db_data:/app/data
-      - registry_certs:/app/data/certs  # Certificado generado aquí, compartido con central
+      - registry_certs:/app/data/certs  # cert generado aquí, compartido con central
     environment:
       REGISTRY_PORT: 8443
       DB_PATH: /app/data/registry.db
-      # FIX [1.4]: JWT_SECRET_KEY obligatoria, sin valor por defecto inseguro
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY debe estar en .env}
       REGISTRY_ADMIN_KEY: ${REGISTRY_ADMIN_KEY:-admin-key-change-in-production}
       REGISTRY_DATA_DIR: /app/data/certs
       LOG_LEVEL: INFO
@@ -168,29 +168,29 @@ services:
       timeout: 10s
       retries: 3
 
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
   # API_CENTRAL
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
 
   api_central:
     image: evcharging-app:latest
     container_name: api_central
     networks: [evcharging]
     depends_on:
-      central:
-        condition: service_started
       kafka:
         condition: service_healthy
-    ports: ["8082:8082"]
+      app-build:
+        condition: service_completed_successfully
+    ports:
+      - "8082:8082"
     volumes:
-      - ./api_central:/app/api_central:rw
+      - ./api_central:/app/api_central:ro
       - ./security:/app/security:ro
       - db_data:/app/data
     environment:
       API_PORT: 8082
       DB_PATH: /app/data/evcharging.db
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      # FIX [1.5]: API key para autenticar alertas weather
       WEATHER_API_KEY: ${WEATHER_API_KEY:-weather-api-key-change-in-production}
       LOG_LEVEL: INFO
     command: python api_central/api_central.py
@@ -201,9 +201,9 @@ services:
       timeout: 10s
       retries: 3
 
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
   # WEATHER
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
 
   weather:
     image: evcharging-app:latest
@@ -212,27 +212,26 @@ services:
     depends_on:
       api_central:
         condition: service_started
+      app-build:
+        condition: service_completed_successfully
     volumes:
-      - ./weather:/app/weather:rw
+      - ./weather:/app/weather:rw   # rw: guarda locations.json
       - ./security:/app/security:ro
     environment:
-      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
-      # FIX [2.3]: Puerto corregido a 8082
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:?OPENWEATHER_API_KEY debe estar en .env}
       CENTRAL_API_URL: http://api_central:8082
       CHECK_INTERVAL: 4
-      # FIX [1.5]: misma key que api_central
       WEATHER_API_KEY: ${WEATHER_API_KEY:-weather-api-key-change-in-production}
       WEATHER_LOCATIONS_FILE: /app/weather/locations.json
       LOG_LEVEL: INFO
     stdin_open: true
     tty: true
-    # FIX [3.3]: No reiniciar automáticamente un servicio interactivo
-    restart: "no"
+    restart: on-failure
     command: python weather/ev_w.py
 
-  # ─────────────────────────────────────────────────────────────────────
-  # FRONT
-  # ─────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────
+  # FRONT (nginx sirviendo index.html estático)
+  # ───────────────────────────────────────────────────────────────────
 
   front:
     image: nginx:alpine
@@ -240,7 +239,8 @@ services:
     networks: [evcharging]
     depends_on:
       - api_central
-    ports: ["80:80"]
+    ports:
+      - "80:80"
     volumes:
       - ./front:/usr/share/nginx/html:ro
     restart: unless-stopped
