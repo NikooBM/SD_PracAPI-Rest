@@ -1,70 +1,72 @@
 #!/bin/bash
+# launch_drivers.sh — PC3: Drivers
+set -euo pipefail
+
 echo "=============================================="
-echo "EVCharging - Lanzamiento PC3 (Drivers)"
+echo " EVCharging — Lanzamiento PC3 (Drivers)"
 echo "=============================================="
 
-# Limpiar Drivers anteriores
-echo "🧹 Limpiando Drivers antiguos..."
-docker rm -f $(docker ps -a -q --filter "name=driver-") 2>/dev/null || true
+# ── Limpieza ────────────────────────────────────────────────────────
+echo "🧹 Limpiando Drivers anteriores..."
+docker ps -a --format '{{.Names}}' | grep '^driver-' | xargs -r docker rm -f 2>/dev/null || true
 
-# Solicitar IP de PC1
-read -p "Introduce la IP del PC1 (Central): " IP_CENTRAL
+# ── IP de PC1 ────────────────────────────────────────────────────────
+read -rp "Introduce la IP del PC1 (Central/Kafka): " IP_CENTRAL
+[ -z "$IP_CENTRAL" ] && { echo "❌ IP requerida."; exit 1; }
 
-if [ -z "$IP_CENTRAL" ]; then
-    echo "❌ Error: Se necesita la IP de PC1."
-    exit 1
+# ── Número de Drivers ────────────────────────────────────────────────
+read -rp "Número de Drivers a desplegar [default: 2]: " NUM_DRIVERS
+NUM_DRIVERS="${NUM_DRIVERS:-2}"
+
+# ── Imagen Docker ────────────────────────────────────────────────────
+IMAGE="evcharging-app:latest"
+if ! docker image inspect "$IMAGE" &>/dev/null; then
+    echo "🛠️  Imagen no encontrada, construyendo..."
+    docker build -t "$IMAGE" .
 fi
 
-# Número de Drivers
-read -p "Número de Drivers a desplegar (default: 2): " NUM_DRIVERS
-NUM_DRIVERS=${NUM_DRIVERS:-2}
-
+# ── Lanzar Drivers ───────────────────────────────────────────────────
 echo ""
 echo "🚀 Desplegando $NUM_DRIVERS Drivers..."
-echo "=============================================="
 
-for i in $(seq 1 $NUM_DRIVERS); do
-    DRIVER_ID=$(printf "Driver_%03d" $i)
-    CONTAINER_NAME=$(echo $DRIVER_ID | tr '_' '-' | tr '[:upper:]' '[:lower:]')
-    
+for i in $(seq 1 "$NUM_DRIVERS"); do
+    DRIVER_ID=$(printf "Driver_%03d" "$i")
+    # Nombre de contenedor: driver-001, driver-002, …
+    CONTAINER=$(echo "$DRIVER_ID" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+
     echo ""
-    echo "--- Lanzando $DRIVER_ID ---"
-    
+    echo "--- ${DRIVER_ID} ---"
+
     docker run -d -it \
-        --name $CONTAINER_NAME \
+        --name "$CONTAINER" \
         --network host \
-        -e DRIVER_ID=$DRIVER_ID \
-        -e KAFKA_BOOTSTRAP_SERVERS=${IP_CENTRAL}:9092 \
+        -e DRIVER_ID="$DRIVER_ID" \
+        -e KAFKA_BOOTSTRAP_SERVERS="${IP_CENTRAL}:9092" \
         -e PYTHONUNBUFFERED=1 \
-        -v $(pwd)/driver:/app/driver:rw \
-        -v $(pwd)/security:/app/security:ro \
-        principal-kafka-init \
+        -v "$(pwd)/driver:/app/driver:rw" \
+        -v "$(pwd)/security:/app/security:ro" \
+        "$IMAGE" \
         python driver/ev_driver.py
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error desplegando Driver $DRIVER_ID"
-        continue
-    fi
-    
-    echo "✅ $DRIVER_ID lanzado"
-    echo "   Para interactuar: docker attach $CONTAINER_NAME"
+
+    echo "✅ ${DRIVER_ID} lanzado"
+    echo "   Conectar: docker attach ${CONTAINER}"
     sleep 1
 done
 
 echo ""
 echo "=============================================="
-echo "✅ $NUM_DRIVERS Drivers desplegados en PC3"
+echo " ✅ PC3 listo — $NUM_DRIVERS Drivers"
 echo "=============================================="
+echo " 💡 Comandos útiles:"
+echo "   Ver Drivers:   docker ps --filter 'name=driver'"
+echo "   Conectar:      docker attach driver-001"
+echo "   Desconectar:   CTRL+P  CTRL+Q"
+echo "   Parar todos:   docker stop \$(docker ps -q --filter 'name=driver')"
 echo ""
-echo "📋 Comandos útiles:"
-echo "  - Ver Drivers activos:  docker ps --filter 'name=driver'"
-echo "  - Logs de un Driver:    docker logs -f driver-001"
-echo "  - Conectar a un Driver: docker attach driver-001"
-echo "  - Parar todos:          docker stop \$(docker ps -q --filter 'name=driver')"
-echo "=============================================="
-echo ""
-echo "💡 IMPORTANTE: Para interactuar con un Driver:"
-echo "   1. docker attach driver-001"
-echo "   2. Usar comandos: request CP001, file services/servicios.txt, etc."
-echo "   3. Salir: CTRL+P seguido de CTRL+Q (sin detener el contenedor)"
+echo " 💡 Comandos del Driver (tras docker attach):"
+echo "   request CP001              — solicitar carga en CP001"
+echo "   file services/servicios.txt — cargar lista desde archivo"
+echo "   status                     — ver estado"
+echo "   msg                        — ver mensajes"
+echo "   quit                       — salir"
 echo "=============================================="

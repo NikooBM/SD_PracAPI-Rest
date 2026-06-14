@@ -1,87 +1,75 @@
 #!/bin/bash
-# launch_central.sh
+# launch_central.sh — PC1: Kafka + Central + Registry + API_Central + Front + Weather
+set -euo pipefail
 
 echo "=============================================="
-echo "EVCharging - Lanzamiento PC1 (CENTRAL)"
+echo " EVCharging — Lanzamiento PC1 (CENTRAL)"
 echo "=============================================="
 
-# Solicitar IP del PC1
-read -p "Introduce la IP de este PC (PC1): " IP_PC1
+# ── IP del PC1 ──────────────────────────────────────────────────────
+read -rp "Introduce la IP de este PC (PC1) [default: localhost]: " IP_PC1
+IP_PC1="${IP_PC1:-localhost}"
 
-if [ -z "$IP_PC1" ]; then
-    echo "❌ Error: Se necesita una IP."
-    exit 1
-fi
-
-# Usar backup file y sed con -i.bak para compatibilidad
-echo "📝 Configurando Kafka con IP: $IP_PC1"
-
-# Crear backup
-cp docker compose.yml docker-compose.yml.bak
-
-# CORRECCIÓN: sed con sintaxis correcta
-sed -i.tmp "s/TU_IP_PC1/${IP_PC1}/g" docker-compose.yml
-
-# Limpiar archivos temporales
-rm -f docker compose.yml.tmp docker-compose.yml.bak
-
-echo "✅ docker-compose.yml actualizado"
-
-# Solicitar API Key de OpenWeather
-read -p "Introduce tu OpenWeather API Key: " OPENWEATHER_KEY
-
+# ── API Key OpenWeather ─────────────────────────────────────────────
+read -rp "OpenWeather API Key (entra en openweathermap.org): " OPENWEATHER_KEY
 if [ -z "$OPENWEATHER_KEY" ]; then
-    echo "⚠️  Advertencia: No se proporcionó API Key de OpenWeather"
-    echo "   EV_W no funcionará correctamente"
-    OPENWEATHER_KEY="dummy_key"
+    echo "⚠️  Sin API Key de OpenWeather — EV_W no podrá consultar el clima."
+    OPENWEATHER_KEY="dummy_key_not_set"
 fi
 
-# Crear archivo .env
+# ── Generar .env ─────────────────────────────────────────────────────
+JWT_SECRET=$(openssl rand -hex 32)
+MACHINE_SECRET=$(openssl rand -hex 24)
+WEATHER_API_KEY=$(openssl rand -hex 16)
+
 cat > .env << ENVEOF
-OPENWEATHER_API_KEY=$OPENWEATHER_KEY
-JWT_SECRET_KEY=$(openssl rand -hex 32)
+# Generado por launch_central.sh — NO subir a git
+OPENWEATHER_API_KEY=${OPENWEATHER_KEY}
+JWT_SECRET_KEY=${JWT_SECRET}
+MACHINE_SECRET=${MACHINE_SECRET}
+REGISTRY_ADMIN_KEY=$(openssl rand -hex 16)
+WEATHER_API_KEY=${WEATHER_API_KEY}
+# En local usa localhost; en distribuido, pon aquí la IP real del PC1.
+KAFKA_EXTERNAL_IP=${IP_PC1}
 ENVEOF
 
-echo "✅ Configuración guardada en .env"
+echo "✅ Archivo .env generado"
+echo "   KAFKA_EXTERNAL_IP=${IP_PC1}"
 
-# Limpiar contenedores anteriores
-echo "🧹 Limpiando sistema anterior..."
-docker compose down -v 2>/dev/null
+# ── Limpiar y construir ──────────────────────────────────────────────
+echo ""
+echo "🧹 Limpiando contenedores anteriores..."
+docker compose down -v 2>/dev/null || true
 
-# Construir imagen
 echo "🛠️  Construyendo imagen Docker..."
 docker compose build
 
-if [ $? -ne 0 ]; then
-    echo "❌ Error en build"
-    exit 1
-fi
-
-# Lanzar servicios
 echo "🚀 Lanzando servicios en PC1..."
 docker compose up -d
 
 echo ""
 echo "=============================================="
-echo "✅ PC1 (Central) lanzado correctamente"
+echo " ✅ PC1 lanzado correctamente"
 echo "=============================================="
-echo "Servicios disponibles:"
-echo "  - Central Socket:  ${IP_PC1}:5001"
-echo "  - Kafka:           ${IP_PC1}:9092"
-echo "  - API Central:     http://${IP_PC1}:8080"
-echo "  - Registry HTTPS:  https://${IP_PC1}:8443"
-echo "  - Front Web:       http://${IP_PC1}:80"
+echo " Servicios:"
+echo "   Central Socket  → ${IP_PC1}:5001"
+echo "   Kafka externo   → ${IP_PC1}:9092"
+echo "   API Central     → http://${IP_PC1}:8082"
+echo "   Registry HTTPS  → https://${IP_PC1}:8443"
+echo "   Front Web       → http://${IP_PC1}:80"
 echo "=============================================="
 echo ""
-echo "📋 Próximos pasos:"
-echo "  1. En PC2: Ejecutar ./launch_cps.sh"
-echo "  2. En PC3: Ejecutar ./launch_drivers.sh"
-echo "  3. Usar la IP: $IP_PC1 cuando se solicite"
+echo " 📋 En PC2 ejecuta:   ./launch_cps.sh"
+echo "    Cuando pregunte la IP de PC1 introduce: ${IP_PC1}"
+echo " 📋 En PC3 ejecuta:   ./launch_drivers.sh"
+echo "    Cuando pregunte la IP de PC1 introduce: ${IP_PC1}"
+echo ""
+echo " 💡 El weather (EV_W) está en PC2 junto a los CPs."
+echo "    Para interactuar: docker attach ev_w"
 echo "=============================================="
+echo ""
 
-# Mostrar logs de Central
-echo ""
-read -p "¿Ver logs de Central? (s/n): " VER_LOGS
-if [ "$VER_LOGS" = "s" ]; then
+read -rp "¿Ver logs de la Central? (s/n): " VER_LOGS
+if [ "${VER_LOGS}" = "s" ]; then
     docker compose logs -f central
 fi
